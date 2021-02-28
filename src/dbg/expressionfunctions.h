@@ -1,6 +1,7 @@
 #pragma once
 
 #include "_global.h"
+#include <functional>
 
 class ExpressionFunctions
 {
@@ -18,9 +19,9 @@ private:
     struct Function
     {
         String name;
-        int argc;
+        int argc = 0;
         CBEXPRESSIONFUNCTION cbFunction;
-        void* userdata;
+        void* userdata = nullptr;
         std::vector<String> aliases;
     };
 

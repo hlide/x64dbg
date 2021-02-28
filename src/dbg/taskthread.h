@@ -16,14 +16,13 @@ protected:
     F fn;
     std::tuple<Args...> args;
     bool active = true;
-    std::thread thread;
+    HANDLE hThread;
     CRITICAL_SECTION access;
     HANDLE wakeupSemaphore;
 
     size_t minSleepTimeMs = 0;
-    //size_t wakeups = 0;
-    //size_t execs = 0;
-    bool outstandingRequest = false;
+    size_t wakeups = 0;
+    size_t execs = 0;
     void Loop();
 
     // Given new args, compress it into old args.
@@ -99,15 +98,12 @@ std::tuple<Args...> TaskThread_<F, Args...>::CompressArguments(Args && ... _args
 
 template <typename F, typename... Args> void TaskThread_<F, Args...>::WakeUp(Args... _args)
 {
-    //++this->wakeups;
+    ++this->wakeups;
     EnterCriticalSection(&this->access);
     this->args = CompressArguments(std::forward<Args>(_args)...);
     LeaveCriticalSection(&this->access);
     // This will fail silently if it's redundant, which is what we want.
-    if(ReleaseSemaphore(this->wakeupSemaphore, 1, nullptr) == FALSE)
-    {
-        outstandingRequest = true;
-    }
+    ReleaseSemaphore(this->wakeupSemaphore, 1, nullptr);
 }
 
 template <typename F, typename... Args> void TaskThread_<F, Args...>::Loop()
@@ -115,11 +111,9 @@ template <typename F, typename... Args> void TaskThread_<F, Args...>::Loop()
     std::tuple<Args...> argLatch;
     while(this->active)
     {
-        if(outstandingRequest == false)
-            WaitForSingleObject(this->wakeupSemaphore, INFINITE);
+        WaitForSingleObject(this->wakeupSemaphore, INFINITE);
 
         EnterCriticalSection(&this->access);
-        outstandingRequest = false;
         argLatch = this->args;
         this->ResetArgs();
         LeaveCriticalSection(&this->access);
@@ -128,7 +122,7 @@ template <typename F, typename... Args> void TaskThread_<F, Args...>::Loop()
         {
             apply_from_tuple(this->fn, argLatch);
             std::this_thread::sleep_for(std::chrono::milliseconds(this->minSleepTimeMs));
-            //++this->execs;
+            ++this->execs;
         }
     }
 }
@@ -140,10 +134,11 @@ TaskThread_<F, Args...>::TaskThread_(F fn,
     this->wakeupSemaphore = CreateSemaphoreW(nullptr, 0, 1, nullptr);
     InitializeCriticalSection(&this->access);
 
-    this->thread = std::thread([this]
+    this->hThread = CreateThread(nullptr, 0, [](LPVOID thisPtr) -> DWORD
     {
-        this->Loop();
-    });
+        ((TaskThread_<F, Args...>*)thisPtr)->Loop();
+        return 0;
+    }, this, 0, nullptr);
 }
 
 template <typename F, typename... Args>
@@ -154,7 +149,8 @@ TaskThread_<F, Args...>::~TaskThread_()
     LeaveCriticalSection(&this->access);
     ReleaseSemaphore(this->wakeupSemaphore, 1, nullptr);
 
-    this->thread.join(); //TODO: Microsoft C++ exception: std::system_error on exit
+    WaitForSingleObject(this->hThread, INFINITE);
+    CloseHandle(this->hThread);
 
     DeleteCriticalSection(&this->access);
     CloseHandle(this->wakeupSemaphore);

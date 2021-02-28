@@ -4,7 +4,7 @@
 @brief Implements runtime database saving and loading.
 */
 
-#include "lz4\lz4file.h"
+#include "lz4/lz4file.h"
 #include "console.h"
 #include "breakpoint.h"
 #include "patches.h"
@@ -23,13 +23,19 @@
 #include "encodemap.h"
 #include "plugin_loader.h"
 #include "argument.h"
-#include "debugger.h"
 #include "filemap.h"
+#include "debugger.h"
+#include "stringformat.h"
 
 /**
 \brief Directory where program databases are stored (usually in \db). UTF-8 encoding.
 */
 char dbbasepath[deflen];
+
+/**
+\brief The hash of the debuggee stored in the database
+*/
+duint dbhash = 0;
 
 /**
 \brief Path of the current program database. UTF-8 encoding.
@@ -41,7 +47,8 @@ void DbSave(DbLoadSaveType saveType, const char* dbfile, bool disablecompression
     EXCLUSIVE_ACQUIRE(LockDatabase);
 
     auto file = dbfile ? dbfile : dbpath;
-    auto cmdlinepath = file + String(".cmdline");
+    auto filename = strrchr(file, '\\');
+    auto cmdlinepath = filename ? StringUtils::sprintf("%s%s.cmdline", dbbasepath, filename) : file + String(".cmdline");
     dprintf(QT_TRANSLATE_NOOP("DBG", "Saving database to %s "), file);
     DWORD ticks = GetTickCount();
     JSON root = json_object();
@@ -104,6 +111,13 @@ void DbSave(DbLoadSaveType saveType, const char* dbfile, bool disablecompression
         if(json_object_size(pluginRoot))
             json_object_set(root, "plugins", pluginRoot);
         json_decref(pluginRoot);
+
+        //store the file hash only if other data is saved in the database
+        if(dbhash != 0 && json_object_size(root))
+        {
+            json_object_set_new(root, "hashAlgorithm", json_string("murmurhash"));
+            json_object_set_new(root, "hash", json_hex(dbhash));
+        }
     }
 
     auto wdbpath = StringUtils::Utf8ToUtf16(file);
@@ -124,7 +138,8 @@ void DbSave(DbLoadSaveType saveType, const char* dbfile, bool disablecompression
 
         if(!dumpSuccess)
         {
-            dputs(QT_TRANSLATE_NOOP("DBG", "\nFailed to write database file!"));
+            String error = stringformatinline(StringUtils::sprintf("{winerror@%d}", GetLastError()));
+            dprintf(QT_TRANSLATE_NOOP("DBG", "\nFailed to write database file !(GetLastError() = %s)\n"), error.c_str());
             json_decref(root);
             return;
         }
@@ -147,6 +162,14 @@ void DbLoad(DbLoadSaveType loadType, const char* dbfile)
     EXCLUSIVE_ACQUIRE(LockDatabase);
 
     auto file = dbfile ? dbfile : dbpath;
+    // If the file is "bak", load from database backup instead
+    if(stricmp(file, "bak") == 0)
+    {
+        String dbpath_backup(dbpath);
+        dbpath_backup.append(".bak");
+        DbLoad(loadType, dbpath_backup.c_str());
+        return;
+    }
     // If the file doesn't exist, there is no DB to load
     if(!FileExists(file))
         return;
@@ -186,7 +209,8 @@ void DbLoad(DbLoadSaveType loadType, const char* dbfile)
     FileMap<char> dbMap;
     if(!dbMap.Map(databasePathW.c_str()))
     {
-        dputs(QT_TRANSLATE_NOOP("DBG", "\nFailed to read database file!"));
+        String error = stringformatinline(StringUtils::sprintf("{winerror@%d}", GetLastError()));
+        dprintf(QT_TRANSLATE_NOOP("DBG", "\nFailed to read database file !(GetLastError() = %s)\n"), error.c_str());
         return;
     }
 
@@ -214,6 +238,12 @@ void DbLoad(DbLoadSaveType loadType, const char* dbfile)
 
     if(loadType == DbLoadSaveType::DebugData || loadType == DbLoadSaveType::All)
     {
+        auto hashalgo = json_string_value(json_object_get(root, "hashAlgorithm"));
+        if(hashalgo && strcmp(hashalgo, "murmurhash") == 0) //Checking checksum of the debuggee.
+            dbhash = duint(json_hex_value(json_object_get(root, "hash")));
+        else
+            dbhash = 0;
+
         // Finally load all structures
         CommentCacheLoad(root);
         LabelCacheLoad(root);
@@ -286,7 +316,10 @@ void DbClear(bool terminating)
     GuiSetDebuggeeNotes("");
 
     if(terminating)
+    {
         PatchClear();
+        dbhash = 0;
+    }
 }
 
 void DbSetPath(const char* Directory, const char* ModulePath)
@@ -305,7 +338,10 @@ void DbSetPath(const char* Directory, const char* ModulePath)
         if(!CreateDirectoryW(StringUtils::Utf8ToUtf16(Directory).c_str(), nullptr))
         {
             if(GetLastError() != ERROR_ALREADY_EXISTS)
-                dprintf(QT_TRANSLATE_NOOP("DBG", "Warning: Failed to create database folder '%s'. Path may be read only.\n"), Directory);
+            {
+                String error = stringformatinline(StringUtils::sprintf("{winerror@%d}", GetLastError()));
+                dprintf(QT_TRANSLATE_NOOP("DBG", "Warning: Failed to create database folder '%s'. GetLastError() = %s\n"), Directory, error.c_str());
+            }
         }
     }
 
@@ -342,7 +378,22 @@ void DbSetPath(const char* Directory, const char* ModulePath)
             }
         }
 
-        if(settingboolget("Engine", "SaveDatabaseInProgramDirectory"))
+        auto checkWritable = [](const char* fileDir)
+        {
+            auto testfile = StringUtils::Utf8ToUtf16(StringUtils::sprintf("%s\\%X.x64dbg", fileDir, GetTickCount()));
+            auto hFile = CreateFileW(testfile.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+            if(hFile == INVALID_HANDLE_VALUE)
+            {
+                String error = stringformatinline(StringUtils::sprintf("{winerror@%d}", GetLastError()));
+                dprintf(QT_TRANSLATE_NOOP("DBG", "Cannot write to the program directory (GetLastError() = %s), try running x64dbg as admin...\n"), error.c_str());
+                return false;
+            }
+            CloseHandle(hFile);
+            DeleteFileW(testfile.c_str());
+            return true;
+        };
+
+        if(settingboolget("Engine", "SaveDatabaseInProgramDirectory") && checkWritable(fileDir))
         {
             // Absolute path in the program directory
             sprintf_s(dbpath, "%s\\%s.%s", fileDir, dbName, dbType);
@@ -355,4 +406,27 @@ void DbSetPath(const char* Directory, const char* ModulePath)
 
         dprintf(QT_TRANSLATE_NOOP("DBG", "Database file: %s\n"), dbpath);
     }
+}
+
+/**
+\brief Warn the user if the hash in the database and the executable mismatch.
+*/
+bool DbCheckHash(duint currentHash)
+{
+    if(dbhash != 0 && currentHash != 0 && dbhash != currentHash)
+    {
+        dputs(QT_TRANSLATE_NOOP("DBG", "WARNING: The database has a checksum that is different from the module you are debugging. It is possible that your debuggee has been modified since last session. The content of this database may be incorrect."));
+        dbhash = currentHash;
+        return false;
+    }
+    else
+    {
+        dbhash = currentHash;
+        return true;
+    }
+}
+
+duint DbGetHash()
+{
+    return dbhash;
 }

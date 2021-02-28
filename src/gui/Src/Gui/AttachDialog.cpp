@@ -1,8 +1,10 @@
 #include "AttachDialog.h"
 #include "ui_AttachDialog.h"
-#include "SearchListView.h"
+#include "StdIconSearchListView.h"
+#include "StdTable.h"
 #include <QMenu>
 #include <QMessageBox>
+#include <QFileInfo>
 
 AttachDialog::AttachDialog(QWidget* parent) : QDialog(parent), ui(new Ui::AttachDialog)
 {
@@ -25,22 +27,19 @@ AttachDialog::AttachDialog(QWidget* parent) : QDialog(parent), ui(new Ui::Attach
     connect(ui->btnRefresh, SIGNAL(clicked()), this, SLOT(refresh()));
 
     // Create search view (regex disabled)
-    mSearchListView = new SearchListView(false, this);
-    mSearchListView->mSearchStartCol = 1;
+    mSearchListView = new StdIconSearchListView(this, false, false);
+    mSearchListView->mSearchStartCol = 0;
     ui->verticalLayout->insertWidget(0, mSearchListView);
 
     //setup process list
-    int charwidth = mSearchListView->mList->getCharWidth();
-    mSearchListView->mList->addColumnAt(charwidth * sizeof(int) * 2 + 8, tr("PID"), true);
-    mSearchListView->mList->addColumnAt(500, tr("Path"), true);
-    mSearchListView->mList->addColumnAt(800, tr("Command Line Arguments"), true);
-    mSearchListView->mList->setDrawDebugOnly(false);
-
-    charwidth = mSearchListView->mSearchList->getCharWidth();
-    mSearchListView->mSearchList->addColumnAt(charwidth * sizeof(int) * 2 + 8, tr("PID"), true);
-    mSearchListView->mSearchList->addColumnAt(500, tr("Path"), true);
-    mSearchListView->mSearchList->addColumnAt(800, tr("Command Line Arguments"), true);
-    mSearchListView->mSearchList->setDrawDebugOnly(false);
+    int charwidth = mSearchListView->getCharWidth();
+    mSearchListView->addColumnAt(charwidth * sizeof(int) * 2 + 8, tr("PID"), true, QString(), ConfigBool("Gui", "PidTidInHex") ? StdTable::SortBy::AsHex : StdTable::SortBy::AsInt);
+    mSearchListView->addColumnAt(150, tr("Name"), true);
+    mSearchListView->addColumnAt(300, tr("Title"), true);
+    mSearchListView->addColumnAt(500, tr("Path"), true);
+    mSearchListView->addColumnAt(800, tr("Command Line Arguments"), true);
+    mSearchListView->setIconColumn(1); // Name
+    mSearchListView->setDrawDebugOnly(false);
 
     connect(mSearchListView, SIGNAL(enterPressedSignal()), this, SLOT(on_btnAttach_clicked()));
     connect(mSearchListView, SIGNAL(listContextMenuSignal(QMenu*)), this, SLOT(processListContextMenu(QMenu*)));
@@ -48,41 +47,44 @@ AttachDialog::AttachDialog(QWidget* parent) : QDialog(parent), ui(new Ui::Attach
     // Highlight the search box
     mSearchListView->mCurList->setFocus();
 
+    Config()->setupWindowPos(this);
+
     // Populate the process list atleast once
     refresh();
 }
 
 AttachDialog::~AttachDialog()
 {
+    Config()->saveWindowPos(this);
     delete ui;
 }
 
 void AttachDialog::refresh()
 {
-    mSearchListView->mList->setRowCount(0);
-    mSearchListView->mList->setTableOffset(0);
+    mSearchListView->setRowCount(0);
     DBGPROCESSINFO* entries;
     int count;
     if(!DbgFunctions()->GetProcessList(&entries, &count))
         return;
-    mSearchListView->mList->setRowCount(count);
+    mSearchListView->setRowCount(count);
     for(int i = 0; i < count; i++)
     {
-        mSearchListView->mList->setCellContent(i, 0, QString().sprintf(ConfigBool("Gui", "PidInHex") ? "%.8X" : "%u", entries[i].dwProcessId));
-        mSearchListView->mList->setCellContent(i, 1, QString(entries[i].szExeFile));
-        mSearchListView->mList->setCellContent(i, 2, QString(entries[i].szExeArgs));
+        QFileInfo fi(entries[i].szExeFile);
+        mSearchListView->setCellContent(i, ColPid, QString().sprintf(ConfigBool("Gui", "PidTidInHex") ? "%.8X" : "%u", entries[i].dwProcessId));
+        mSearchListView->setCellContent(i, ColName, fi.baseName());
+        mSearchListView->setCellContent(i, ColTitle, QString(entries[i].szExeMainWindowTitle));
+        mSearchListView->setCellContent(i, ColPath, QString(entries[i].szExeFile));
+        mSearchListView->setCellContent(i, ColCommandLine, QString(entries[i].szExeArgs));
+        mSearchListView->setRowIcon(i, getFileIcon(QString(entries[i].szExeFile)));
     }
-    mSearchListView->mList->setSingleSelection(0);
-    mSearchListView->mList->reloadData();
+    mSearchListView->reloadData();
     mSearchListView->refreshSearchList();
 }
 
 void AttachDialog::on_btnAttach_clicked()
 {
-    QString pid = mSearchListView->mCurList->getCellContent(mSearchListView->mCurList->getInitialSelection(), 0);
-    if(!ConfigBool("Gui", "PidInHex"))
-        pid.sprintf("%.8X", pid.toULong());
-    DbgCmdExec(QString("attach " + pid).toUtf8().constData());
+    QString pid = mSearchListView->mCurList->getCellContent(mSearchListView->mCurList->getInitialSelection(), ColPid);
+    DbgCmdExec(QString("attach %1%2").arg(ConfigBool("Gui", "PidTidInHex") ? "" : ".").arg(pid));
     accept();
 }
 
@@ -108,13 +110,13 @@ retryFindWindow:
         if(tid = GetWindowThreadProcessId(hWndFound, &pid))
         {
             refresh();
-            QString pidText = QString().sprintf(ConfigBool("Gui", "PidInHex") ? "%.8X" : "%u", pid);
+            QString pidText = QString().sprintf(ConfigBool("Gui", "PidTidInHex") ? "%.8X" : "%u", pid);
             bool found = false;
-            for(int i = 0; i < mSearchListView->mList->getRowCount(); i++)
+            for(int i = 0; i < mSearchListView->mCurList->getRowCount(); i++)
             {
-                if(mSearchListView->mList->getCellContent(i, 0) == pidText)
+                if(mSearchListView->mCurList->getCellContent(i, ColPid) == pidText)
                 {
-                    mSearchListView->mList->setSingleSelection(i);
+                    mSearchListView->mCurList->setSingleSelection(i);
                     found = true;
                     break;
                 }
@@ -126,7 +128,7 @@ retryFindWindow:
                                                 QMessageBox::Yes | QMessageBox::No, this);
                 if(hiddenProcessDialog.exec() == QMessageBox::Yes)
                 {
-                    DbgCmdExec(QString("attach %1").arg(pid, 0, 16).toUtf8().constData());
+                    DbgCmdExec(QString("attach %1").arg(pid, 0, 16));
                     accept();
                 }
             }

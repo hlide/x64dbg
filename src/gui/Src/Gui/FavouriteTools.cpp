@@ -6,6 +6,7 @@
 #include <QFileDialog>
 #include <QMessageBox>
 #include "MiscUtil.h"
+#include "Configuration.h"
 #include <QTableWidget>
 
 FavouriteTools::FavouriteTools(QWidget* parent) :
@@ -67,6 +68,8 @@ FavouriteTools::FavouriteTools(QWidget* parent) :
     connect(ui->tabWidget, SIGNAL(currentChanged(int)), this, SLOT(tabChanged(int)));
     emit ui->listTools->itemSelectionChanged();
     updateToolsBtnEnabled();
+
+    Config()->setupWindowPos(this);
 }
 
 void FavouriteTools::setupTools(QString name, QTableWidget* list)
@@ -122,7 +125,7 @@ void FavouriteTools::on_btnAddFavouriteTool_clicked()
     memset(buffer, 0, sizeof(buffer));
     BridgeSettingGet("Favourite", "LastToolPath", buffer);
     BrowseDialog browse(this, tr("Browse tool"), tr("Enter the path of the tool."), tr("Executable Files (*.exe);;All Files (*.*)"), QString(buffer), false);
-    if(browse.exec() != QDialog::Accepted && browse.path.length())
+    if(browse.exec() != QDialog::Accepted || browse.path.length() == 0)
         return;
     filename = browse.path;
     BridgeSettingSet("Favourite", "LastToolPath", filename.toUtf8().constData());
@@ -406,7 +409,8 @@ void FavouriteTools::on_btnClearShortcut_clicked()
 
 void FavouriteTools::on_btnOK_clicked()
 {
-    for(int i = 1; i <= ui->listTools->rowCount(); i++)
+    int i;
+    for(i = 1; i <= ui->listTools->rowCount(); i++)
     {
         BridgeSettingSet("Favourite", QString("Tool%1").arg(i).toUtf8().constData(), ui->listTools->item(i - 1, 0)->text().toUtf8().constData());
         BridgeSettingSet("Favourite", QString("ToolShortcut%1").arg(i).toUtf8().constData(), ui->listTools->item(i - 1, 1)->text().toUtf8().constData());
@@ -419,12 +423,17 @@ void FavouriteTools::on_btnOK_clicked()
         BridgeSettingSet("Favourite", "ToolDescription1", "");
     }
     else
-        for(int i = ui->listTools->rowCount() + 1; i <= originalToolsCount; i++)
+    {
+        i = ui->listTools->rowCount() + 1;
+        do // Run this at least once to ensure no old tools can be brought to live
         {
             BridgeSettingSet("Favourite", QString("Tool%1").arg(i).toUtf8().constData(), "");
             BridgeSettingSet("Favourite", QString("ToolShortcut%1").arg(i).toUtf8().constData(), "");
             BridgeSettingSet("Favourite", QString("ToolDescription%1").arg(i).toUtf8().constData(), "");
+            i++;
         }
+        while(i <= originalToolsCount);
+    }
     for(int i = 1; i <= ui->listScript->rowCount(); i++)
     {
         BridgeSettingSet("Favourite", QString("Script%1").arg(i).toUtf8().constData(), ui->listScript->item(i - 1, 0)->text().toUtf8().constData());
@@ -438,12 +447,17 @@ void FavouriteTools::on_btnOK_clicked()
         BridgeSettingSet("Favourite", "ScriptDescription1", "");
     }
     else
-        for(int i = ui->listScript->rowCount() + 1; i <= originalScriptCount; i++)
+    {
+        i = ui->listScript->rowCount() + 1;
+        do
         {
             BridgeSettingSet("Favourite", QString("Script%1").arg(i).toUtf8().constData(), "");
             BridgeSettingSet("Favourite", QString("ScriptShortcut%1").arg(i).toUtf8().constData(), "");
             BridgeSettingSet("Favourite", QString("ScriptDescription%1").arg(i).toUtf8().constData(), "");
+            i++;
         }
+        while(i <= originalScriptCount);
+    }
     for(int i = 1; i <= ui->listCommand->rowCount(); i++)
     {
         BridgeSettingSet("Favourite", QString("Command%1").arg(i).toUtf8().constData(), ui->listCommand->item(i - 1, 0)->text().toUtf8().constData());
@@ -455,11 +469,16 @@ void FavouriteTools::on_btnOK_clicked()
         BridgeSettingSet("Favourite", "CommandShortcut1", "");
     }
     else
-        for(int i = ui->listCommand->rowCount() + 1; i <= originalCommandCount; i++)
+    {
+        i = ui->listCommand->rowCount() + 1;
+        do
         {
             BridgeSettingSet("Favourite", QString("Command%1").arg(i).toUtf8().constData(), "");
             BridgeSettingSet("Favourite", QString("CommandShortcut%1").arg(i).toUtf8().constData(), "");
+            i++;
         }
+        while(i <= originalCommandCount);
+    }
     this->done(QDialog::Accepted);
 }
 
@@ -484,6 +503,7 @@ void FavouriteTools::tabChanged(int i)
 
 FavouriteTools::~FavouriteTools()
 {
+    Config()->saveWindowPos(this);
     delete ui;
 }
 

@@ -17,38 +17,38 @@ void ThreadView::contextMenuSlot(const QPoint & pos)
 void ThreadView::GoToThreadEntry()
 {
     QString addr_text = getCellContent(getInitialSelection(), 2);
-    DbgCmdExecDirect(QString("disasm " + addr_text).toUtf8().constData());
+    DbgCmdExecDirect(QString("disasm " + addr_text));
 }
 
 void ThreadView::setupContextMenu()
 {
     mMenuBuilder = new MenuBuilder(this);
     //Switch thread menu
-    mMenuBuilder->addAction(makeCommandAction(new QAction(tr("Switch Thread"), this), "switchthread $"));
+    mMenuBuilder->addAction(makeCommandAction(new QAction(DIcon("thread-switch.png"), tr("Switch Thread"), this), "switchthread $"));
 
     //Suspend thread menu
-    mMenuBuilder->addAction(makeCommandAction(new QAction(tr("Suspend Thread"), this), "suspendthread $"));
+    mMenuBuilder->addAction(makeCommandAction(new QAction(DIcon("thread-pause.png"), tr("Suspend Thread"), this), "suspendthread $"));
 
     //Resume thread menu
-    mMenuBuilder->addAction(makeCommandAction(new QAction(tr("Resume Thread"), this), "resumethread $"));
+    mMenuBuilder->addAction(makeCommandAction(new QAction(DIcon("thread-resume.png"), tr("Resume Thread"), this), "resumethread $"));
 
-    mMenuBuilder->addAction(makeCommandAction(new QAction(tr("Suspend All Threads"), this), "suspendallthreads"));
+    mMenuBuilder->addAction(makeCommandAction(new QAction(DIcon("thread-pause.png"), tr("Suspend All Threads"), this), "suspendallthreads"));
 
-    mMenuBuilder->addAction(makeCommandAction(new QAction(tr("Resume All Threads"), this), "resumeallthreads"));
+    mMenuBuilder->addAction(makeCommandAction(new QAction(DIcon("thread-resume.png"), tr("Resume All Threads"), this), "resumeallthreads"));
 
     //Kill thread menu
-    mMenuBuilder->addAction(makeCommandAction(new QAction(tr("Kill Thread"), this), "killthread $"));
+    mMenuBuilder->addAction(makeCommandAction(new QAction(DIcon("thread-kill.png"), tr("Kill Thread"), this), "killthread $"));
     mMenuBuilder->addSeparator();
     // Set name
-    mMenuBuilder->addAction(makeAction(tr("Set Name"), SLOT(SetNameSlot())));
+    mMenuBuilder->addAction(makeAction(DIcon("thread-setname.png"), tr("Set Name"), SLOT(SetNameSlot())));
     // Set priority
-    QAction* mSetPriorityIdle = makeCommandAction(new QAction(tr("Idle"), this), "setprioritythread $, Idle");
-    QAction* mSetPriorityAboveNormal = makeCommandAction(new QAction(tr("Above Normal"), this), "setprioritythread $, AboveNormal");
-    QAction* mSetPriorityBelowNormal = makeCommandAction(new QAction(tr("Below Normal"), this), "setprioritythread $, BelowNormal");
-    QAction* mSetPriorityHighest = makeCommandAction(new QAction(tr("Highest"), this), "setprioritythread $, Highest");
-    QAction* mSetPriorityLowest = makeCommandAction(new QAction(tr("Lowest"), this), "setprioritythread $, Lowest");
-    QAction* mSetPriorityNormal = makeCommandAction(new QAction(tr("Normal"), this), "setprioritythread $, Normal");
-    QAction* mSetPriorityTimeCritical = makeCommandAction(new QAction(tr("Time Critical"), this), "setprioritythread $, TimeCritical");
+    QAction* mSetPriorityIdle = makeCommandAction(new QAction(DIcon("thread-priority-idle.png"), tr("Idle"), this), "setprioritythread $, Idle");
+    QAction* mSetPriorityAboveNormal = makeCommandAction(new QAction(DIcon("thread-priority-above-normal.png"), tr("Above Normal"), this), "setprioritythread $, AboveNormal");
+    QAction* mSetPriorityBelowNormal = makeCommandAction(new QAction(DIcon("thread-priority-below-normal.png"), tr("Below Normal"), this), "setprioritythread $, BelowNormal");
+    QAction* mSetPriorityHighest = makeCommandAction(new QAction(DIcon("thread-priority-highest.png"), tr("Highest"), this), "setprioritythread $, Highest");
+    QAction* mSetPriorityLowest = makeCommandAction(new QAction(DIcon("thread-priority-lowest.png"), tr("Lowest"), this), "setprioritythread $, Lowest");
+    QAction* mSetPriorityNormal = makeCommandAction(new QAction(DIcon("thread-priority-normal.png"), tr("Normal"), this), "setprioritythread $, Normal");
+    QAction* mSetPriorityTimeCritical = makeCommandAction(new QAction(DIcon("thread-priority-timecritical.png"), tr("Time Critical"), this), "setprioritythread $, TimeCritical");
     MenuBuilder* mSetPriority = new MenuBuilder(this, [this, mSetPriorityIdle, mSetPriorityAboveNormal, mSetPriorityBelowNormal,
                   mSetPriorityHighest, mSetPriorityLowest, mSetPriorityNormal, mSetPriorityTimeCritical](QMenu*)
     {
@@ -92,10 +92,10 @@ void ThreadView::setupContextMenu()
     mSetPriority->addAction(mSetPriorityBelowNormal);
     mSetPriority->addAction(mSetPriorityLowest);
     mSetPriority->addAction(mSetPriorityIdle);
-    mMenuBuilder->addMenu(makeMenu(tr("Set Priority")), mSetPriority);
+    mMenuBuilder->addMenu(makeMenu(DIcon("thread-setpriority_alt.png"), tr("Set Priority")), mSetPriority);
 
     // GoToThreadEntry
-    mMenuBuilder->addAction(makeAction(tr("Go to Thread Entry"), SLOT(GoToThreadEntry())), [this](QMenu * menu)
+    mMenuBuilder->addAction(makeAction(DIcon("thread-entry.png"), tr("Go to Thread Entry"), SLOT(GoToThreadEntry())), [this](QMenu * menu)
     {
         bool ok;
         ULONGLONG entry = getCellContent(getInitialSelection(), 2).toULongLong(&ok, 16);
@@ -138,32 +138,38 @@ void ThreadView::ExecCommand()
     if(action)
     {
         QString command = action->data().toString();
-        command.replace(QChar('$'), getCellContent(getInitialSelection(), 1)); // $ -> Thread Id
-        DbgCmdExec(command.toUtf8().constData());
+        if(command.contains('$'))
+        {
+            for(int i : getSelection())
+            {
+                QString specializedCommand = command;
+                specializedCommand.replace(QChar('$'), ToHexString(getCellUserdata(i, 1))); // $ -> Thread Id
+                DbgCmdExec(specializedCommand);
+            }
+        }
+        else
+            DbgCmdExec(command);
     }
 }
 
 ThreadView::ThreadView(StdTable* parent) : StdTable(parent)
 {
+    enableMultiSelection(true);
     int charwidth = getCharWidth();
-    addColumnAt(8 + charwidth * sizeof(unsigned int) * 2, tr("Number"), false, "", SortBy::AsInt);
-    addColumnAt(8 + charwidth * sizeof(unsigned int) * 2, tr("ID"), false, "", SortBy::AsHex);
-    addColumnAt(8 + charwidth * sizeof(duint) * 2, tr("Entry"), false, "", SortBy::AsHex);
-    addColumnAt(8 + charwidth * sizeof(duint) * 2, tr("TEB"), false, "", SortBy::AsHex);
-#ifdef _WIN64
-    addColumnAt(8 + charwidth * sizeof(duint) * 2, tr("RIP"), false, "", SortBy::AsHex);
-#else
-    addColumnAt(8 + charwidth * sizeof(duint) * 2, tr("EIP"), false, "", SortBy::AsHex);
-#endif //_WIN64
-    addColumnAt(8 + charwidth * 14, tr("Suspend Count"), false, "", SortBy::AsInt);
-    addColumnAt(8 + charwidth * 12, tr("Priority"), false);
-    addColumnAt(8 + charwidth * 12, tr("Wait Reason"), false);
-    addColumnAt(8 + charwidth * 10, tr("Last Error"), false);
-    addColumnAt(8 + charwidth * 16, tr("User Time"), false);
-    addColumnAt(8 + charwidth * 16, tr("Kernel Time"), false);
-    addColumnAt(8 + charwidth * 16, tr("Creation Time"), false);
-    addColumnAt(8 + charwidth * 10, tr("CPU Cycles"), false, "", SortBy::AsInt);
-    addColumnAt(8, tr("Name"), false);
+    addColumnAt(8 + charwidth * sizeof(unsigned int) * 2, tr("Number"), true, "", SortBy::AsInt);
+    addColumnAt(8 + charwidth * sizeof(unsigned int) * 2, tr("ID"), true, "", ConfigBool("Gui", "PidTidInHex") ? SortBy::AsHex : SortBy::AsInt);
+    addColumnAt(8 + charwidth * sizeof(duint) * 2, tr("Entry"), true, "", SortBy::AsHex);
+    addColumnAt(8 + charwidth * sizeof(duint) * 2, tr("TEB"), true, "", SortBy::AsHex);
+    addColumnAt(8 + charwidth * sizeof(duint) * 2, ArchValue(tr("EIP"), tr("RIP")), true, "", SortBy::AsHex);
+    addColumnAt(8 + charwidth * 14, tr("Suspend Count"), true, "", SortBy::AsInt);
+    addColumnAt(8 + charwidth * 12, tr("Priority"), true);
+    addColumnAt(8 + charwidth * 12, tr("Wait Reason"), true);
+    addColumnAt(8 + charwidth * 10, tr("Last Error"), true, "", SortBy::AsHex);
+    addColumnAt(8 + charwidth * 16, tr("User Time"), true);
+    addColumnAt(8 + charwidth * 16, tr("Kernel Time"), true);
+    addColumnAt(8 + charwidth * 16, tr("Creation Time"), true);
+    addColumnAt(8 + charwidth * 10, tr("CPU Cycles"), true, "", SortBy::AsHex);
+    addColumnAt(8, tr("Name"), true);
     loadColumnFromConfig("Thread");
 
     //setCopyMenuOnly(true);
@@ -181,13 +187,15 @@ void ThreadView::updateThreadList()
     memset(&threadList, 0, sizeof(THREADLIST));
     DbgGetThreadList(&threadList);
     setRowCount(threadList.count);
+    auto tidFormat = ConfigBool("Gui", "PidTidInHex") ? "%X" : "%d";
     for(int i = 0; i < threadList.count; i++)
     {
         if(!threadList.list[i].BasicInfo.ThreadNumber)
             setCellContent(i, 0, tr("Main"));
         else
             setCellContent(i, 0, ToDecString(threadList.list[i].BasicInfo.ThreadNumber));
-        setCellContent(i, 1, ToHexString(threadList.list[i].BasicInfo.ThreadId));
+        setCellContent(i, 1, QString().sprintf(tidFormat, threadList.list[i].BasicInfo.ThreadId));
+        setCellUserdata(i, 1, threadList.list[i].BasicInfo.ThreadId);
         setCellContent(i, 2, ToPtrString(threadList.list[i].BasicInfo.ThreadStartAddress));
         setCellContent(i, 3, ToPtrString(threadList.list[i].BasicInfo.ThreadLocalBase));
         setCellContent(i, 4, ToPtrString(threadList.list[i].ThreadCip));
@@ -347,12 +355,12 @@ void ThreadView::updateThreadList()
         setCellContent(i, 12, ToLongLongHexString(threadList.list[i].Cycles));
         setCellContent(i, 13, threadList.list[i].BasicInfo.threadName);
     }
-    mCurrentThreadId = "NONE";
+    mCurrentThreadId = -1;
     if(threadList.count)
     {
         int currentThread = threadList.CurrentThread;
         if(currentThread >= 0 && currentThread < threadList.count)
-            mCurrentThreadId = ToHexString(threadList.list[currentThread].BasicInfo.ThreadId);
+            mCurrentThreadId = threadList.list[currentThread].BasicInfo.ThreadId;
         BridgeFree(threadList.list);
     }
     reloadData();
@@ -361,7 +369,7 @@ void ThreadView::updateThreadList()
 QString ThreadView::paintContent(QPainter* painter, dsint rowBase, int rowOffset, int col, int x, int y, int w, int h)
 {
     QString ret = StdTable::paintContent(painter, rowBase, rowOffset, col, x, y, w, h);
-    QString threadId = getCellContent(rowBase + rowOffset, 1);
+    duint threadId = getCellUserdata(rowBase + rowOffset, 1);
     if(threadId == mCurrentThreadId && !col)
     {
         painter->fillRect(QRect(x, y, w, h), QBrush(ConfigColor("ThreadCurrentBackgroundColor")));
@@ -374,18 +382,21 @@ QString ThreadView::paintContent(QPainter* painter, dsint rowBase, int rowOffset
 
 void ThreadView::doubleClickedSlot()
 {
-    QString threadId = getCellContent(getInitialSelection(), 1);
-    DbgCmdExecDirect(QString("switchthread " + threadId).toUtf8().constData());
+    duint threadId = getCellUserdata(getInitialSelection(), 1);
+    DbgCmdExecDirect("switchthread " + ToHexString(threadId));
+
+    QString addr_text = getCellContent(getInitialSelection(), 4);
+    DbgCmdExec("disasm " + addr_text);
 }
 
 void ThreadView::SetNameSlot()
 {
-    QString threadId = getCellContent(getInitialSelection(), 1);
+    duint threadId = getCellUserdata(getInitialSelection(), 1);
     LineEditDialog mLineEdit(this);
-    mLineEdit.setWindowTitle(tr("Name"));
+    mLineEdit.setWindowTitle(tr("Name") + threadId);
     mLineEdit.setText(getCellContent(getInitialSelection(), 13));
     if(mLineEdit.exec() != QDialog::Accepted)
         return;
     QString escapedName = mLineEdit.editText.replace("\"", "\\\"");
-    DbgCmdExec(QString("setthreadname %1, \"%2\"").arg(threadId).arg(escapedName).toUtf8().constData());
+    DbgCmdExec(QString("setthreadname %1, \"%2\"").arg(ToHexString(threadId)).arg(escapedName));
 }

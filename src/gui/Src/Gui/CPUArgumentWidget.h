@@ -37,11 +37,11 @@ public:
     {
         if(argText.length())
             return QString("%1: %2").arg(argName).arg(argText);
-        return "";
+        return QString();
     }
 
 public slots:
-    void disassembledAtSlot(dsint addr, dsint cip, bool history, dsint newTableOffset);
+    void disassembleAtSlot(dsint addr, dsint cip);
     void refreshData();
 
 private slots:

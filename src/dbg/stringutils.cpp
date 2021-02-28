@@ -1,7 +1,29 @@
 #include "stringutils.h"
-#include "value.h"
 #include <windows.h>
 #include <cstdint>
+
+static inline bool convertLongLongNumber(const char* str, unsigned long long & result, int radix)
+{
+    errno = 0;
+    char* end;
+    result = strtoull(str, &end, radix);
+    if(!result && end == str)
+        return false;
+    if(result == ULLONG_MAX && errno)
+        return false;
+    if(*end)
+        return false;
+    return true;
+}
+
+static inline bool convertNumber(const char* str, size_t & result, int radix)
+{
+    unsigned long long llr;
+    if(!convertLongLongNumber(str, llr, radix))
+        return false;
+    result = size_t(llr);
+    return true;
+}
 
 void StringUtils::Split(const String & s, char delim, std::vector<String> & elems)
 {
@@ -31,7 +53,7 @@ StringList StringUtils::Split(const String & s, char delim)
 }
 
 //https://github.com/lefticus/presentations/blob/master/PracticalPerformancePractices.md#smaller-code-is-faster-code-11
-String StringUtils::Escape(unsigned char ch)
+String StringUtils::Escape(unsigned char ch, bool escapeSafe)
 {
     char buf[8] = "";
     switch(ch)
@@ -39,19 +61,23 @@ String StringUtils::Escape(unsigned char ch)
     case '\0':
         return "\\0";
     case '\t':
-        return "\\t";
+        return escapeSafe ? "\\t" : "\t";
     case '\f':
         return "\\f";
     case '\v':
         return "\\v";
     case '\n':
-        return "\\n";
+        return escapeSafe ? "\\n" : "\n";
     case '\r':
-        return "\\r";
+        return escapeSafe ? "\\r" : "\r";
     case '\\':
-        return "\\\\";
+        return escapeSafe ? "\\\\" : "\\";
     case '\"':
-        return "\\\"";
+        return escapeSafe ? "\\\"" : "\"";
+    case '\a':
+        return "\\a";
+    case '\b':
+        return "\\b";
     default:
         if(!isprint(ch)) //unknown unprintable character
             sprintf_s(buf, "\\x%02X", ch);
@@ -101,7 +127,7 @@ static int IsValidUTF8Char(const char* data, int size)
         return 1;
 }
 
-String StringUtils::Escape(const String & s)
+String StringUtils::Escape(const String & s, bool escapeSafe)
 {
     std::string escaped;
     escaped.reserve(s.length() + s.length() / 2);
@@ -116,7 +142,10 @@ String StringUtils::Escape(const String & s)
             memcpy(buf, "\\0", 2);
             break;
         case '\t':
-            memcpy(buf, "\\t", 2);
+            if(escapeSafe)
+                memcpy(buf, "\\t", 2);
+            else
+                memcpy(buf, &ch, 1);
             break;
         case '\f':
             memcpy(buf, "\\f", 2);
@@ -125,16 +154,28 @@ String StringUtils::Escape(const String & s)
             memcpy(buf, "\\v", 2);
             break;
         case '\n':
-            memcpy(buf, "\\n", 2);
+            if(escapeSafe)
+                memcpy(buf, "\\n", 2);
+            else
+                memcpy(buf, &ch, 1);
             break;
         case '\r':
-            memcpy(buf, "\\r", 2);
+            if(escapeSafe)
+                memcpy(buf, "\\r", 2);
+            else
+                memcpy(buf, &ch, 1);
             break;
         case '\\':
-            memcpy(buf, "\\\\", 2);
+            if(escapeSafe)
+                memcpy(buf, "\\\\", 2);
+            else
+                memcpy(buf, &ch, 1);
             break;
         case '\"':
-            memcpy(buf, "\\\"", 2);
+            if(escapeSafe)
+                memcpy(buf, "\\\"", 2);
+            else
+                memcpy(buf, &ch, 1);
             break;
         default:
             int UTF8CharSize;
@@ -239,7 +280,7 @@ const String StringUtils::WHITESPACE = " \n\r\t";
 
 String StringUtils::Trim(const String & s, const String & delim)
 {
-    return TrimRight(TrimLeft(s));
+    return TrimRight(TrimLeft(s, delim), delim);
 }
 
 String StringUtils::TrimLeft(const String & s, const String & delim)
@@ -268,38 +309,87 @@ String StringUtils::PadLeft(const String & s, size_t minLength, char ch)
 //Conversion functions taken from: http://www.nubaria.com/en/blog/?p=289
 String StringUtils::Utf16ToUtf8(const WString & wstr)
 {
-    String convertedString;
-    auto requiredSize = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if(requiredSize > 0)
-    {
-        std::vector<char> buffer(requiredSize);
-        WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, &buffer[0], requiredSize, nullptr, nullptr);
-        convertedString.assign(buffer.begin(), buffer.end() - 1);
-    }
-    return convertedString;
+    return Utf16ToUtf8(wstr.c_str());
 }
 
 String StringUtils::Utf16ToUtf8(const wchar_t* wstr)
 {
-    return Utf16ToUtf8(wstr ? WString(wstr) : WString());
-}
-
-WString StringUtils::Utf8ToUtf16(const String & str)
-{
-    WString convertedString;
-    int requiredSize = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, nullptr, 0);
+    String convertedString;
+    if(!wstr || !*wstr)
+        return convertedString;
+    auto requiredSize = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
     if(requiredSize > 0)
     {
-        std::vector<wchar_t> buffer(requiredSize);
-        MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &buffer[0], requiredSize);
-        convertedString.assign(buffer.begin(), buffer.end() - 1);
+        convertedString.resize(requiredSize - 1);
+        if(!WideCharToMultiByte(CP_UTF8, 0, wstr, -1, (char*)convertedString.c_str(), requiredSize, nullptr, nullptr))
+            convertedString.clear();
     }
     return convertedString;
 }
 
+WString StringUtils::Utf8ToUtf16(const String & str)
+{
+    return Utf8ToUtf16(str.c_str());
+}
+
 WString StringUtils::Utf8ToUtf16(const char* str)
 {
-    return Utf8ToUtf16(str ? String(str) : String());
+    WString convertedString;
+    if(!str || !*str)
+        return convertedString;
+    int requiredSize = MultiByteToWideChar(CP_UTF8, 0, str, -1, nullptr, 0);
+    if(requiredSize > 0)
+    {
+        convertedString.resize(requiredSize - 1);
+        if(!MultiByteToWideChar(CP_UTF8, 0, str, -1, (wchar_t*)convertedString.c_str(), requiredSize))
+            convertedString.clear();
+    }
+    return convertedString;
+}
+
+String StringUtils::LocalCpToUtf8(const String & str)
+{
+    return LocalCpToUtf8(str.c_str());
+}
+
+String StringUtils::LocalCpToUtf8(const char* str)
+{
+    return Utf16ToUtf8(LocalCpToUtf16(str).c_str());
+}
+
+WString StringUtils::LocalCpToUtf16(const String & str)
+{
+    return LocalCpToUtf16(str.c_str());
+}
+
+WString StringUtils::LocalCpToUtf16(const char* str)
+{
+    WString convertedString;
+    if(!str || !*str)
+        return convertedString;
+    int requiredSize = MultiByteToWideChar(CP_ACP, 0, str, -1, nullptr, 0);
+    if(requiredSize > 0)
+    {
+        convertedString.resize(requiredSize - 1);
+        if(!MultiByteToWideChar(CP_ACP, 0, str, -1, (wchar_t*)convertedString.c_str(), requiredSize))
+            convertedString.clear();
+    }
+    return convertedString;
+}
+
+String StringUtils::Utf16ToLocalCp(const WString & str)
+{
+    String convertedString;
+    if(str.size() == 0)
+        return convertedString;
+    int requiredSize = WideCharToMultiByte(CP_ACP, 0, str.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if(requiredSize > 0)
+    {
+        convertedString.resize(requiredSize - 1);
+        if(!WideCharToMultiByte(CP_ACP, 0, str.c_str(), -1, (char*)convertedString.c_str(), requiredSize, nullptr, nullptr))
+            convertedString.clear();
+    }
+    return convertedString;
 }
 
 //Taken from: https://stackoverflow.com/a/24315631
@@ -323,11 +413,8 @@ void StringUtils::ReplaceAll(WString & s, const WString & from, const WString & 
     }
 }
 
-String StringUtils::sprintf(_Printf_format_string_ const char* format, ...)
+String StringUtils::vsprintf(_In_z_ _Printf_format_string_ const char* format, va_list args)
 {
-    va_list args;
-    va_start(args, format);
-
     char sbuffer[64] = "";
     if(_vsnprintf_s(sbuffer, _TRUNCATE, format, args) != -1)
         return sbuffer;
@@ -344,15 +431,20 @@ String StringUtils::sprintf(_Printf_format_string_ const char* format, ...)
         else
             break;
     }
-    va_end(args);
     return String(buffer.data());
 }
 
-WString StringUtils::sprintf(_Printf_format_string_ const wchar_t* format, ...)
+String StringUtils::sprintf(_In_z_ _Printf_format_string_ const char* format, ...)
 {
     va_list args;
     va_start(args, format);
+    auto result = vsprintf(format, args);
+    va_end(args);
+    return result;
+}
 
+WString StringUtils::vsprintf(_In_z_ _Printf_format_string_ const wchar_t* format, va_list args)
+{
     wchar_t sbuffer[64] = L"";
     if(_vsnwprintf_s(sbuffer, _TRUNCATE, format, args) != -1)
         return sbuffer;
@@ -369,8 +461,16 @@ WString StringUtils::sprintf(_Printf_format_string_ const wchar_t* format, ...)
         else
             break;
     }
-    va_end(args);
     return WString(buffer.data());
+}
+
+WString StringUtils::sprintf(_In_z_ _Printf_format_string_ const wchar_t* format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    auto result = vsprintf(format, args);
+    va_end(args);
+    return result;
 }
 
 String StringUtils::ToLower(const String & s)
@@ -381,9 +481,14 @@ String StringUtils::ToLower(const String & s)
     return result;
 }
 
-bool StringUtils::StartsWith(const String & h, const String & n)
+bool StringUtils::StartsWith(const String & str, const String & prefix)
 {
-    return strstr(h.c_str(), n.c_str()) == h.c_str();
+    return str.size() >= prefix.size() && 0 == str.compare(0, prefix.size(), prefix);
+}
+
+bool StringUtils::EndsWith(const String & str, const String & suffix)
+{
+    return str.size() >= suffix.size() && 0 == str.compare(str.size() - suffix.size(), suffix.size(), suffix);
 }
 
 static int hex2int(char ch)
@@ -423,7 +528,7 @@ String StringUtils::ToHex(unsigned long long value)
 
 #define HEXLOOKUP "0123456789ABCDEF"
 
-String StringUtils::ToHex(unsigned char* buffer, size_t size, bool reverse)
+String StringUtils::ToHex(const unsigned char* buffer, size_t size, bool reverse)
 {
     String result;
     result.resize(size * 2);
@@ -436,7 +541,7 @@ String StringUtils::ToHex(unsigned char* buffer, size_t size, bool reverse)
     return result;
 }
 
-String StringUtils::ToCompressedHex(unsigned char* buffer, size_t size)
+String StringUtils::ToCompressedHex(const unsigned char* buffer, size_t size)
 {
     if(!size)
         return "";
@@ -504,7 +609,7 @@ bool StringUtils::FromCompressedHex(const String & text, std::vector<unsigned ch
             }
             i++; //eat '}'
 
-            duint repeat = 0;
+            size_t repeat = 0;
             if(!convertNumber(repeatStr.c_str(), repeat, 16) || !repeat) //conversion failed or repeat zero times
                 return false;
             for(size_t j = 1; j < repeat; j++)
@@ -512,4 +617,17 @@ bool StringUtils::FromCompressedHex(const String & text, std::vector<unsigned ch
         }
     }
     return true;
+}
+
+int StringUtils::hackicmp(const char* s1, const char* s2)
+{
+    unsigned char c1, c2;
+    while((c1 = *s1++) == (c2 = *s2++))
+        if(c1 == '\0')
+            return 0;
+    s1--, s2--;
+    while((c1 = tolower(*s1++)) == (c2 = tolower(*s2++)))
+        if(c1 == '\0')
+            return 0;
+    return c1 - c2;
 }

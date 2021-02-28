@@ -6,6 +6,7 @@
 
 #include "variable.h"
 #include "threading.h"
+#include <map>
 
 /**
 \brief The container that stores all variables.
@@ -67,6 +68,8 @@ void varinit()
     varnew("$result2\1$res2", 0, VAR_SYSTEM);
     varnew("$result3\1$res3", 0, VAR_SYSTEM);
     varnew("$result4\1$res4", 0, VAR_SYSTEM);
+    varnew("$__disasm_refindex", 0, VAR_SYSTEM);
+    varnew("$__dump_refindex", 0, VAR_SYSTEM);
 
     // InitDebug variables
     varnew("$hProcess\1$hp", 0, VAR_READONLY);  // Process handle
@@ -79,6 +82,7 @@ void varinit()
     varnew("$breakpointcounter", 0, VAR_READONLY);
     varnew("$breakpointcondition", 0, VAR_SYSTEM);
     varnew("$breakpointlogcondition", 0, VAR_READONLY);
+    varnew("$breakpointexceptionaddress", 0, VAR_READONLY);
 
     // Tracing variables
     varnew("$tracecounter", 0, VAR_READONLY);

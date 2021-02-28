@@ -3,9 +3,12 @@
 
 #include <QProgressBar>
 #include <QLabel>
-#include "SearchListView.h"
+#include "StdSearchListView.h"
+class DisassemblyPopup;
 
-class ReferenceView : public SearchListView
+class QTabWidget;
+
+class ReferenceView : public StdSearchListView
 {
     Q_OBJECT
 
@@ -14,14 +17,16 @@ public:
     void setupContextMenu();
     void connectBridge();
     void disconnectBridge();
+    int progress() const;
+    int currentTaskProgress() const;
 
 public slots:
-    void addColumnAt(int width, QString title);
-    void setRowCount(dsint count);
-    void setCellContent(int r, int c, QString s);
-    void reloadData();
+    void addColumnAtRef(int width, QString title);
+
+    void setRowCount(dsint count) override;
+
     void setSingleSelection(int index, bool scroll);
-    void setSearchStartCol(int col);
+    void addCommand(QString title, QString command);
     void referenceContextMenu(QMenu* wMenu);
     void followAddress();
     void followDumpAddress();
@@ -36,9 +41,14 @@ public slots:
     void refreshShortcutsSlot();
     void referenceSetProgressSlot(int progress);
     void referenceSetCurrentTaskProgressSlot(int progress, QString taskTitle);
+    void searchSelectionChanged(int index);
+    void reloadDataSlot();
 
 signals:
     void showCpu();
+
+private slots:
+    void referenceExecCommand();
 
 private:
     QProgressBar* mSearchTotalProgress;
@@ -52,7 +62,11 @@ private:
     QAction* mRemoveBreakpointOnAllCommands;
     QAction* mSetBreakpointOnAllApiCalls;
     QAction* mRemoveBreakpointOnAllApiCalls;
+    bool mUpdateCountLabel = false;
     QLabel* mCountTotalLabel;
+    QVector<QString> mCommandTitles;
+    QVector<QString> mCommands;
+    QTabWidget* mParent;
 
     enum BPSetAction
     {
@@ -64,6 +78,8 @@ private:
 
     void setBreakpointAt(int row, BPSetAction action);
     dsint apiAddressFromString(const QString & s);
+
+    void mouseReleaseEvent(QMouseEvent* event);
 };
 
 #endif // REFERENCEVIEW_H

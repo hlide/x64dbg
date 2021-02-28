@@ -33,9 +33,7 @@
 #include "CalculatorDialog.h"
 #include "DebugStatusLabel.h"
 #include "LogStatusLabel.h"
-#include "UpdateChecker.h"
 #include "SourceViewerManager.h"
-#include "SnowmanView.h"
 #include "HandlesView.h"
 #include "MainWindowCloseThread.h"
 #include "TimeWastedCounter.h"
@@ -45,14 +43,16 @@
 #include "CPUMultiDump.h"
 #include "CPUStack.h"
 #include "GotoDialog.h"
-#include "BrowseDialog.h"
+#include "SystemBreakpointScriptDialog.h"
 #include "CustomizeMenuDialog.h"
 #include "main.h"
 #include "SimpleTraceDialog.h"
 #include "CPUArgumentWidget.h"
 #include "MRUList.h"
-
-QString MainWindow::windowTitle = "";
+#include "AboutDialog.h"
+#include "UpdateChecker.h"
+#include "Tracer/TraceBrowser.h"
+#include "Tracer/TraceWidget.h"
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent),
@@ -61,30 +61,51 @@ MainWindow::MainWindow(QWidget* parent)
     ui->setupUi(this);
 
     // Build information
-    QAction* buildInfo = new QAction(ToDateString(GetCompileDate()), this);
-    buildInfo->setEnabled(false);
-    ui->menuBar->addAction(buildInfo);
+    {
+        const char* debugEngine = []
+        {
+            switch(DbgGetDebugEngine())
+            {
+            case DebugEngineTitanEngine:
+                return "TitanEngine";
+            case DebugEngineGleeBug:
+                return "GleeBug";
+            case DebugEngineStaticEngine:
+                return "StaticEngine";
+            }
+            return "";
+        }();
+
+        QAction* buildInfo = new QAction(tr("%1 (%2)").arg(ToDateString(GetCompileDate())).arg(debugEngine), this);
+        buildInfo->setEnabled(false);
+        ui->menuBar->addAction(buildInfo);
+    }
 
     // Setup bridge signals
     connect(Bridge::getBridge(), SIGNAL(updateWindowTitle(QString)), this, SLOT(updateWindowTitleSlot(QString)));
     connect(Bridge::getBridge(), SIGNAL(addRecentFile(QString)), this, SLOT(addRecentFile(QString)));
     connect(Bridge::getBridge(), SIGNAL(setLastException(uint)), this, SLOT(setLastException(uint)));
-    connect(Bridge::getBridge(), SIGNAL(menuAddMenuToList(QWidget*, QMenu*, int, int)), this, SLOT(addMenuToList(QWidget*, QMenu*, int, int)));
+    connect(Bridge::getBridge(), SIGNAL(menuAddMenuToList(QWidget*, QMenu*, GUIMENUTYPE, int)), this, SLOT(addMenuToList(QWidget*, QMenu*, GUIMENUTYPE, int)));
     connect(Bridge::getBridge(), SIGNAL(menuAddMenu(int, QString)), this, SLOT(addMenu(int, QString)));
     connect(Bridge::getBridge(), SIGNAL(menuAddMenuEntry(int, QString)), this, SLOT(addMenuEntry(int, QString)));
     connect(Bridge::getBridge(), SIGNAL(menuAddSeparator(int)), this, SLOT(addSeparator(int)));
-    connect(Bridge::getBridge(), SIGNAL(menuClearMenu(int)), this, SLOT(clearMenu(int)));
+    connect(Bridge::getBridge(), SIGNAL(menuClearMenu(int, bool)), this, SLOT(clearMenu(int, bool)));
     connect(Bridge::getBridge(), SIGNAL(menuRemoveMenuEntry(int)), this, SLOT(removeMenuEntry(int)));
     connect(Bridge::getBridge(), SIGNAL(getStrWindow(QString, QString*)), this, SLOT(getStrWindow(QString, QString*)));
     connect(Bridge::getBridge(), SIGNAL(setIconMenu(int, QIcon)), this, SLOT(setIconMenu(int, QIcon)));
     connect(Bridge::getBridge(), SIGNAL(setIconMenuEntry(int, QIcon)), this, SLOT(setIconMenuEntry(int, QIcon)));
     connect(Bridge::getBridge(), SIGNAL(setCheckedMenuEntry(int, bool)), this, SLOT(setCheckedMenuEntry(int, bool)));
     connect(Bridge::getBridge(), SIGNAL(setHotkeyMenuEntry(int, QString, QString)), this, SLOT(setHotkeyMenuEntry(int, QString, QString)));
+    connect(Bridge::getBridge(), SIGNAL(setVisibleMenuEntry(int, bool)), this, SLOT(setVisibleMenuEntry(int, bool)));
+    connect(Bridge::getBridge(), SIGNAL(setVisibleMenu(int, bool)), this, SLOT(setVisibleMenu(int, bool)));
+    connect(Bridge::getBridge(), SIGNAL(setNameMenuEntry(int, QString)), this, SLOT(setNameMenuEntry(int, QString)));
+    connect(Bridge::getBridge(), SIGNAL(setNameMenu(int, QString)), this, SLOT(setNameMenu(int, QString)));
     connect(Bridge::getBridge(), SIGNAL(showCpu()), this, SLOT(displayCpuWidget()));
+    connect(Bridge::getBridge(), SIGNAL(showReferences()), this, SLOT(displayReferencesWidget()));
     connect(Bridge::getBridge(), SIGNAL(addQWidgetTab(QWidget*)), this, SLOT(addQWidgetTab(QWidget*)));
     connect(Bridge::getBridge(), SIGNAL(showQWidgetTab(QWidget*)), this, SLOT(showQWidgetTab(QWidget*)));
     connect(Bridge::getBridge(), SIGNAL(closeQWidgetTab(QWidget*)), this, SLOT(closeQWidgetTab(QWidget*)));
-    connect(Bridge::getBridge(), SIGNAL(executeOnGuiThread(void*)), this, SLOT(executeOnGuiThread(void*)));
+    connect(Bridge::getBridge(), SIGNAL(executeOnGuiThread(void*, void*)), this, SLOT(executeOnGuiThread(void*, void*)));
     connect(Bridge::getBridge(), SIGNAL(dbgStateChanged(DBGSTATE)), this, SLOT(dbgStateChangedSlot(DBGSTATE)));
     connect(Bridge::getBridge(), SIGNAL(addFavouriteItem(int, QString, QString)), this, SLOT(addFavouriteItem(int, QString, QString)));
     connect(Bridge::getBridge(), SIGNAL(setFavouriteItemShortcut(int, QString, QString)), this, SLOT(setFavouriteItemShortcut(int, QString, QString)));
@@ -93,10 +114,16 @@ MainWindow::MainWindow(QWidget* parent)
 
     // Setup menu API
     initMenuApi();
-    addMenuToList(this, ui->menuPlugins, GUI_PLUGIN_MENU);
+    Bridge::getBridge()->emitMenuAddToList(this, ui->menuPlugins, GUI_PLUGIN_MENU);
 
     // Set window title
-    mWindowMainTitle = QCoreApplication::applicationName();
+    if(BridgeIsProcessElevated())
+    {
+        mWindowMainTitle = tr("%1 [Elevated]").arg(QCoreApplication::applicationName());
+        ui->actionRestartAdmin->setEnabled(false);
+    }
+    else
+        mWindowMainTitle = QCoreApplication::applicationName();
     setWindowTitle(QString(mWindowMainTitle));
 
     // Load application icon
@@ -119,6 +146,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     // Symbol view
     mSymbolView = new SymbolView();
+    Bridge::getBridge()->symbolView = mSymbolView;
     mSymbolView->setWindowTitle(tr("Symbols"));
     mSymbolView->setWindowIcon(DIcon("pdb.png"));
     mSymbolView->hide();
@@ -180,14 +208,6 @@ MainWindow::MainWindow(QWidget* parent)
     mThreadView->setWindowTitle(tr("Threads"));
     mThreadView->setWindowIcon(DIcon("arrow-threads.png"));
 
-    // Snowman view (decompiler)
-    mSnowmanView = CreateSnowman(this);
-    if(!mSnowmanView)
-        mSnowmanView = new QLabel("<center>Snowman is disabled...</center>", this);
-    mSnowmanView->setWindowTitle(tr("Snowman"));
-    mSnowmanView->setWindowIcon(DIcon("snowman.png"));
-    Bridge::getBridge()->snowmanView = mSnowmanView;
-
     // Notes manager
     mNotesManager = new NotesManager(this);
     mNotesManager->setWindowTitle(tr("Notes"));
@@ -198,17 +218,17 @@ MainWindow::MainWindow(QWidget* parent)
     mHandlesView->setWindowTitle(tr("Handles"));
     mHandlesView->setWindowIcon(DIcon("handles.png"));
 
-    // Graph view
-    mGraphView = new DisassemblerGraphView(this);
-    mGraphView->setWindowTitle(tr("Graph"));
-    mGraphView->setWindowIcon(DIcon("graph.png"));
+    // Trace view
+    mTraceWidget = new TraceWidget(this);
+    mTraceWidget->setWindowTitle(tr("Trace"));
+    mTraceWidget->setWindowIcon(DIcon("trace.png"));
+    connect(mTraceWidget->getTraceBrowser(), SIGNAL(displayReferencesWidget()), this, SLOT(displayReferencesWidget()));
+    connect(mTraceWidget->getTraceBrowser(), SIGNAL(displayLogWidget()), this, SLOT(displayLogWidget()));
 
-    // Create the tab widget and enable detaching and hiding
     mTabWidget = new MHTabWidget(this, true, true);
 
     // Add all widgets to the list
     mWidgetList.push_back(WidgetInfo(mCpuWidget, "CPUTab"));
-    mWidgetList.push_back(WidgetInfo(mGraphView, "GraphTab"));
     mWidgetList.push_back(WidgetInfo(mLogView, "LogTab"));
     mWidgetList.push_back(WidgetInfo(mNotesManager, "NotesTab"));
     mWidgetList.push_back(WidgetInfo(mBreakpointsView, "BreakpointsTab"));
@@ -220,8 +240,8 @@ MainWindow::MainWindow(QWidget* parent)
     mWidgetList.push_back(WidgetInfo(mSourceViewManager, "SourceTab"));
     mWidgetList.push_back(WidgetInfo(mReferenceManager, "ReferencesTab"));
     mWidgetList.push_back(WidgetInfo(mThreadView, "ThreadsTab"));
-    mWidgetList.push_back(WidgetInfo(mSnowmanView, "SnowmanTab"));
     mWidgetList.push_back(WidgetInfo(mHandlesView, "HandlesTab"));
+    mWidgetList.push_back(WidgetInfo(mTraceWidget, "TraceTab"));
 
     // If LoadSaveTabOrder disabled, load tabs in default order
     if(!ConfigBool("Gui", "LoadSaveTabOrder"))
@@ -276,8 +296,9 @@ MainWindow::MainWindow(QWidget* parent)
     connect(ui->actionRunSelection, SIGNAL(triggered()), this, SLOT(runSelection()));
     connect(ui->actionRunExpression, SIGNAL(triggered(bool)), this, SLOT(runExpression()));
     makeCommandAction(ui->actionHideDebugger, "hide");
-    connect(ui->actionCpu, SIGNAL(triggered()), this, SLOT(displayCpuWidget()));
+    connect(ui->actionCpu, SIGNAL(triggered()), this, SLOT(displayCpuWidgetShowCpu()));
     connect(ui->actionSymbolInfo, SIGNAL(triggered()), this, SLOT(displaySymbolWidget()));
+    connect(ui->actionModules, SIGNAL(triggered()), this, SLOT(displaySymbolWidget()));
     connect(ui->actionSource, SIGNAL(triggered()), this, SLOT(displaySourceViewWidget()));
     connect(mSymbolView, SIGNAL(showReferences()), this, SLOT(displayReferencesWidget()));
     connect(ui->actionReferences, SIGNAL(triggered()), this, SLOT(displayReferencesWidget()));
@@ -294,9 +315,9 @@ MainWindow::MainWindow(QWidget* parent)
     connect(ui->actionLabels, SIGNAL(triggered()), this, SLOT(displayLabels()));
     connect(ui->actionBookmarks, SIGNAL(triggered()), this, SLOT(displayBookmarks()));
     connect(ui->actionFunctions, SIGNAL(triggered()), this, SLOT(displayFunctions()));
-    connect(ui->actionCheckUpdates, SIGNAL(triggered()), this, SLOT(checkUpdates()));
     connect(ui->actionCallStack, SIGNAL(triggered()), this, SLOT(displayCallstack()));
     connect(ui->actionSEHChain, SIGNAL(triggered()), this, SLOT(displaySEHChain()));
+    connect(ui->actionTrace, SIGNAL(triggered()), this, SLOT(displayRunTrace()));
     connect(ui->actionDonate, SIGNAL(triggered()), this, SLOT(donate()));
     connect(ui->actionReportBug, SIGNAL(triggered()), this, SLOT(reportBug()));
     connect(ui->actionBlog, SIGNAL(triggered()), this, SLOT(blog()));
@@ -306,11 +327,12 @@ MainWindow::MainWindow(QWidget* parent)
     connect(ui->actionChangeCommandLine, SIGNAL(triggered()), this, SLOT(changeCommandLine()));
     connect(ui->actionManual, SIGNAL(triggered()), this, SLOT(displayManual()));
     connect(ui->actionNotes, SIGNAL(triggered()), this, SLOT(displayNotesWidget()));
-    connect(ui->actionSnowman, SIGNAL(triggered()), this, SLOT(displaySnowmanWidget()));
     connect(ui->actionHandles, SIGNAL(triggered()), this, SLOT(displayHandlesWidget()));
     connect(ui->actionGraph, SIGNAL(triggered()), this, SLOT(displayGraphWidget()));
     connect(ui->actionPreviousTab, SIGNAL(triggered()), this, SLOT(displayPreviousTab()));
     connect(ui->actionNextTab, SIGNAL(triggered()), this, SLOT(displayNextTab()));
+    connect(ui->actionPreviousView, SIGNAL(triggered()), this, SLOT(displayPreviousView()));
+    connect(ui->actionNextView, SIGNAL(triggered()), this, SLOT(displayNextView()));
     connect(ui->actionHideTab, SIGNAL(triggered()), this, SLOT(hideTab()));
     makeCommandAction(ui->actionStepIntoSource, "TraceIntoConditional src.line(cip) && !src.disp(cip)");
     makeCommandAction(ui->actionStepOverSource, "TraceOverConditional src.line(cip) && !src.disp(cip)");
@@ -323,16 +345,18 @@ MainWindow::MainWindow(QWidget* parent)
     connect(ui->actionSetInitializationScript, SIGNAL(triggered()), this, SLOT(setInitializationScript()));
     connect(ui->actionCustomizeMenus, SIGNAL(triggered()), this, SLOT(customizeMenu()));
     connect(ui->actionVariables, SIGNAL(triggered()), this, SLOT(displayVariables()));
+    makeCommandAction(ui->actionDbsave, "dbsave");
+    makeCommandAction(ui->actionDbload, "dbload");
+    makeCommandAction(ui->actionDbrecovery, "dbload bak");
+    makeCommandAction(ui->actionDbclear, "dbclear");
 
     connect(mCpuWidget->getDisasmWidget(), SIGNAL(updateWindowTitle(QString)), this, SLOT(updateWindowTitleSlot(QString)));
     connect(mCpuWidget->getDisasmWidget(), SIGNAL(displayReferencesWidget()), this, SLOT(displayReferencesWidget()));
     connect(mCpuWidget->getDisasmWidget(), SIGNAL(displaySourceManagerWidget()), this, SLOT(displaySourceViewWidget()));
-    connect(mCpuWidget->getDisasmWidget(), SIGNAL(displaySnowmanWidget()), this, SLOT(displaySnowmanWidget()));
     connect(mCpuWidget->getDisasmWidget(), SIGNAL(displayLogWidget()), this, SLOT(displayLogWidget()));
-    connect(mCpuWidget->getDisasmWidget(), SIGNAL(displayGraphWidget()), this, SLOT(displayGraphWidget()));
+    connect(mCpuWidget->getDisasmWidget(), SIGNAL(displaySymbolsWidget()), this, SLOT(displaySymbolWidget()));
     connect(mCpuWidget->getDisasmWidget(), SIGNAL(showPatches()), this, SLOT(patchWindow()));
-
-    connect(mGraphView, SIGNAL(displaySnowmanWidget()), this, SLOT(displaySnowmanWidget()));
+    connect(mCpuWidget->getGraphWidget(), SIGNAL(displayLogWidget()), this, SLOT(displayLogWidget()));
 
     connect(mCpuWidget->getDumpWidget(), SIGNAL(displayReferencesWidget()), this, SLOT(displayReferencesWidget()));
 
@@ -340,13 +364,14 @@ MainWindow::MainWindow(QWidget* parent)
 
     connect(mTabWidget, SIGNAL(tabMovedTabWidget(int, int)), this, SLOT(tabMovedSlot(int, int)));
     connect(Config(), SIGNAL(shortcutsUpdated()), this, SLOT(refreshShortcuts()));
+    connect(Config(), SIGNAL(colorsUpdated()), this, SLOT(updateStyle()));
 
-    // Setup favourite tools menu
+    // Menu stuff
+    actionManageFavourites = nullptr;
+    mFavouriteToolbar = new QToolBar(tr("Favourite Toolbox"), this);
     updateFavouriteTools();
-
-    // Setup language menu
     setupLanguagesMenu();
-
+    setupThemesMenu();
     setupMenuCustomization();
 
     // Set default setttings (when not set)
@@ -355,9 +380,10 @@ MainWindow::MainWindow(QWidget* parent)
     defaultSettings.SaveSettings();
     // Don't need to set shortcuts because the code above will signal refreshShortcuts()
 
-    // Create updatechecker
-    mUpdateChecker = new UpdateChecker(this);
     mSimpleTraceDialog = new SimpleTraceDialog(this);
+
+    // Update checker
+    mUpdateChecker = new UpdateChecker(this);
 
     // Setup close thread and dialog
     bCanClose = false;
@@ -402,32 +428,136 @@ void MainWindow::setupStatusBar()
 
 void MainWindow::setupLanguagesMenu()
 {
-    QDir translationsDir(QString("%1/../translations/").arg(QCoreApplication::applicationDirPath()));
     QMenu* languageMenu;
     if(tr("Languages") == QString("Languages"))
         languageMenu = new QMenu(QString("Languages"));
     else
         languageMenu = new QMenu(tr("Languages") + QString(" Languages"), this);
     languageMenu->setIcon(DIcon("codepage.png"));
+
     QLocale enUS(QLocale::English, QLocale::UnitedStates);
-    QString wCurrentLocale(currentLocale);
     QAction* action_enUS = new QAction(QString("[%1] %2 - %3").arg(enUS.name()).arg(enUS.nativeLanguageName()).arg(enUS.nativeCountryName()), languageMenu);
     connect(action_enUS, SIGNAL(triggered()), this, SLOT(chooseLanguage()));
     action_enUS->setCheckable(true);
     action_enUS->setChecked(false);
     languageMenu->addAction(action_enUS);
+    connect(languageMenu, SIGNAL(aboutToShow()), this, SLOT(setupLanguagesMenu2())); //Load this menu later, since it requires directory scanning.
+    ui->menuOptions->addMenu(languageMenu);
+}
+
+#include "../src/bridge/Utf8Ini.h"
+
+static void importSettings(const QString & filename, const QSet<QString> & sectionWhitelist = {})
+{
+    QFile f(QDir::toNativeSeparators(filename));
+    if(f.open(QFile::ReadOnly | QFile::Text))
+    {
+        QTextStream in(&f);
+        auto style = in.readAll();
+        f.close();
+        Utf8Ini ini;
+        int errorLine;
+        if(ini.Deserialize(style.toStdString(), errorLine))
+        {
+            auto sections = ini.Sections();
+            for(const auto & section : sections)
+            {
+                if(!sectionWhitelist.isEmpty() && !sectionWhitelist.contains(QString::fromStdString(section)))
+                    continue;
+
+                auto keys = ini.Keys(section);
+                for(const auto & key : keys)
+                    BridgeSettingSet(section.c_str(), key.c_str(), ini.GetValue(section, key).c_str());
+            }
+            Config()->load();
+            DbgSettingsUpdated();
+            emit Config()->colorsUpdated();
+            emit Config()->fontsUpdated();
+            emit Config()->guiOptionsUpdated();
+            emit Config()->shortcutsUpdated();
+            emit Config()->tokenizerConfigUpdated();
+            GuiUpdateAllViews();
+        }
+    }
+}
+
+void MainWindow::loadSelectedStyle(bool reloadStyleCss)
+{
+    char selectedTheme[MAX_SETTING_SIZE] = "";
+    QString stylePath(":/css/default.css");
+    QString styleSettings;
+    if(BridgeSettingGet("Theme", "Selected", selectedTheme) && *selectedTheme)
+    {
+        QString themePath = QString("%1/../themes/%2/style.css").arg(QCoreApplication::applicationDirPath()).arg(selectedTheme);
+        if(QFile(themePath).exists())
+            stylePath = themePath;
+        QString settingsPath = QString("%1/../themes/%2/style.ini").arg(QCoreApplication::applicationDirPath()).arg(selectedTheme);
+        if(QFile(themePath).exists())
+            styleSettings = settingsPath;
+    }
+    QFile f(stylePath);
+    if(f.open(QFile::ReadOnly | QFile::Text))
+    {
+        QTextStream in(&f);
+        auto style = in.readAll();
+        f.close();
+        style = style.replace("url(./", QString("url(../themes/%2/").arg(selectedTheme));
+        qApp->setStyleSheet(style);
+    }
+    if(!reloadStyleCss && !styleSettings.isEmpty())
+        importSettings(styleSettings, { "Colors", "Fonts" });
+}
+
+void MainWindow::themeTriggeredSlot()
+{
+    QAction* action = qobject_cast<QAction*>(sender());
+    if(action == nullptr)
+        return;
+    QString dir = action->data().toString();
+    int nameIdx = dir.lastIndexOf('/');
+    QString name = dir.mid(nameIdx + 1);
+    BridgeSettingSet("Theme", "Selected", name.toUtf8().constData());
+    loadSelectedStyle();
+}
+
+void MainWindow::setupThemesMenu()
+{
+    auto exists = [](const QString & str)
+    {
+        return QFile(str).exists();
+    };
+    QDirIterator it(QString("%1/../themes").arg(QCoreApplication::applicationDirPath()), QDir::NoDotAndDotDot | QDir::Dirs);
+    while(it.hasNext())
+    {
+        auto dir = it.next();
+        auto nameIdx = dir.lastIndexOf('/');
+        auto name = dir.mid(nameIdx + 1);
+        auto action = ui->menuTheme->addAction(name);
+        connect(action, SIGNAL(triggered()), this, SLOT(themeTriggeredSlot()));
+        action->setText(name);
+        action->setData(dir);
+    }
+}
+
+void MainWindow::setupLanguagesMenu2()
+{
+    QMenu* languageMenu = dynamic_cast<QMenu*>(sender()); //The only sender is languageMenu
+    QAction* action_enUS = languageMenu->actions()[0]; //There is only one action "action_enUS" created by setupLanguagesMenu()
+    QDir translationsDir(QString("%1/../translations/").arg(QCoreApplication::applicationDirPath()));
+    QString wCurrentLocale(currentLocale);
+
     if(!translationsDir.exists())
     {
         // translations dir do not exist
         action_enUS->setChecked(true);
-        ui->menuOptions->addMenu(languageMenu);
+        disconnect(languageMenu, SIGNAL(aboutToShow()), this, 0);
         return;
     }
     if(wCurrentLocale == QString("en_US"))
         action_enUS->setChecked(true);
     QStringList filter;
     filter << "x64dbg_*.qm";
-    QFileInfoList fileList = translationsDir.entryInfoList(filter, QDir::Readable | QDir::Files, QDir::Size);
+    QFileInfoList fileList = translationsDir.entryInfoList(filter, QDir::Readable | QDir::Files, QDir::Size); //Search for all translations
     auto allLocales = QLocale::matchingLocales(QLocale::AnyLanguage, QLocale::AnyScript, QLocale::AnyCountry);
     for(auto i : fileList)
     {
@@ -445,11 +575,35 @@ void MainWindow::setupLanguagesMenu()
             }
         }
     }
-    ui->menuOptions->addMenu(languageMenu);
+    disconnect(languageMenu, SIGNAL(aboutToShow()), this, 0); //Done. Let's disconnect it to prevent it from initializing twice.
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
+    if(DbgIsDebugging() && ConfigBool("Gui", "ShowExitConfirmation"))
+    {
+        auto cb = new QCheckBox(tr("Don't ask this question again"));
+        QMessageBox msgbox(this);
+        msgbox.setText(tr("The debuggee is still running and will be terminated if you exit. Do you really want to exit?"));
+        msgbox.setWindowTitle(tr("Debuggee is still running"));
+        msgbox.setWindowIcon(DIcon("bug.png"));
+        msgbox.addButton(QMessageBox::Yes);
+        msgbox.addButton(QMessageBox::No);
+        msgbox.setDefaultButton(QMessageBox::No);
+        msgbox.setCheckBox(cb);
+
+        QObject::connect(cb, &QCheckBox::toggled, [](bool checked)
+        {
+            Config()->setBool("Gui", "ShowExitConfirmation", !checked);
+        });
+
+        if(msgbox.exec() != QMessageBox::Yes)
+        {
+            event->ignore();
+            return;
+        }
+    }
+
     duint noClose = 0;
     if(bCanClose)
     {
@@ -466,7 +620,6 @@ void MainWindow::closeEvent(QCloseEvent* event)
     if(bExecuteThread)
     {
         bExecuteThread = false;
-        CloseSnowman(mSnowmanView);
         Sleep(100);
         mCloseThread->start();
         emit Bridge::getBridge()->close();
@@ -503,6 +656,8 @@ void MainWindow::setTab(QWidget* widget)
             return;
         }
     }
+
+    //TODO: restore configuration index
 }
 
 void MainWindow::loadTabDefaultOrder()
@@ -513,6 +668,10 @@ void MainWindow::loadTabDefaultOrder()
     //TODO
     for(int i = 0; i < mWidgetList.size(); i++)
         addQWidgetTab(mWidgetList[i].widget, mWidgetList[i].nativeName);
+
+    // Add plugin tabs to the end
+    for(const auto & widget : mPluginWidgetList)
+        addQWidgetTab(widget.widget, widget.nativeName);
 }
 
 void MainWindow::loadTabSavedOrder()
@@ -546,6 +705,19 @@ void MainWindow::loadTabSavedOrder()
     // Setup tabs
     for(auto & widget : tabIndexToWidget)
         addQWidgetTab(widget.first, widget.second);
+
+    // 'Restore' deleted tabs
+    for(int i = 0; i < mWidgetList.size(); i++)
+    {
+        duint isDeleted = 0;
+        BridgeSettingGetUint("Deleted Tabs", mWidgetList[i].nativeName.toUtf8().constData(), &isDeleted);
+        if(isDeleted)
+            mTabWidget->DeleteTab(mTabWidget->indexOf(mWidgetList[i].widget));
+    }
+
+    // Add plugin tabs to the end
+    for(const auto & widget : mPluginWidgetList)
+        addQWidgetTab(widget.widget, widget.nativeName);
 }
 
 void MainWindow::clearTabWidget()
@@ -560,6 +732,10 @@ void MainWindow::clearTabWidget()
 
 void MainWindow::saveWindowSettings()
 {
+    // Save favourite toolbar
+    BridgeSettingSetUint("Main Window Settings", "FavToolbarVisible", mFavouriteToolbar->isVisible() ? 1 : 0);
+    removeToolBar(mFavouriteToolbar); //Remove it before saving main window settings, otherwise it crashes
+
     // Main Window settings
     BridgeSettingSet("Main Window Settings", "Geometry", saveGeometry().toBase64().data());
     BridgeSettingSet("Main Window Settings", "State", saveState().toBase64().data());
@@ -571,13 +747,16 @@ void MainWindow::saveWindowSettings()
     for(int i = 0; i < mWidgetList.size(); i++)
     {
         bool isDetached = detachedTabWindows.contains(mWidgetList[i].widget);
+        bool isDeleted = !isDetached && mTabWidget->indexOf(mWidgetList[i].widget) == -1;
         BridgeSettingSetUint("Detached Windows", mWidgetList[i].nativeName.toUtf8().constData(), isDetached);
+        BridgeSettingSetUint("Deleted Tabs", mWidgetList[i].nativeName.toUtf8().constData(), isDeleted);
         if(isDetached)
             BridgeSettingSet("Tab Window Settings", mWidgetList[i].nativeName.toUtf8().constData(),
                              mWidgetList[i].widget->parentWidget()->saveGeometry().toBase64().data());
     }
 
     mCpuWidget->saveWindowSettings();
+    mSymbolView->saveWindowSettings();
 }
 
 void MainWindow::loadWindowSettings()
@@ -611,7 +790,23 @@ void MainWindow::loadWindowSettings()
         }
     }
 
+    // 'Restore' deleted tabs
+    for(int i = 0; i < mWidgetList.size(); i++)
+    {
+        duint isDeleted = 0;
+        BridgeSettingGetUint("Deleted Tabs", mWidgetList[i].nativeName.toUtf8().constData(), &isDeleted);
+        if(isDeleted)
+            mTabWidget->DeleteTab(mTabWidget->indexOf(mWidgetList[i].widget));
+    }
+
+    // Load favourite toolbar
+    duint isVisible = 0;
+    BridgeSettingGetUint("Main Window Settings", "FavToolbarVisible", &isVisible);
+    addToolBar(mFavouriteToolbar);
+    mFavouriteToolbar->setVisible(isVisible == 1);
+
     mCpuWidget->loadWindowSettings();
+    mSymbolView->loadWindowSettings();
 }
 
 void MainWindow::setGlobalShortcut(QAction* action, const QKeySequence & key)
@@ -625,6 +820,10 @@ void MainWindow::refreshShortcuts()
     setGlobalShortcut(ui->actionOpen, ConfigShortcut("FileOpen"));
     setGlobalShortcut(ui->actionAttach, ConfigShortcut("FileAttach"));
     setGlobalShortcut(ui->actionDetach, ConfigShortcut("FileDetach"));
+    setGlobalShortcut(ui->actionDbload, ConfigShortcut("FileDbload"));
+    setGlobalShortcut(ui->actionDbsave, ConfigShortcut("FileDbsave"));
+    setGlobalShortcut(ui->actionDbclear, ConfigShortcut("FileDbclear"));
+    setGlobalShortcut(ui->actionDbrecovery, ConfigShortcut("FileDbrecovery"));
     setGlobalShortcut(ui->actionImportdatabase, ConfigShortcut("FileImportDatabase"));
     setGlobalShortcut(ui->actionExportdatabase, ConfigShortcut("FileExportDatabase"));
     setGlobalShortcut(ui->actionRestartAdmin, ConfigShortcut("FileRestartAdmin"));
@@ -638,6 +837,7 @@ void MainWindow::refreshShortcuts()
     setGlobalShortcut(ui->actionSEHChain, ConfigShortcut("ViewSEHChain"));
     setGlobalShortcut(ui->actionScript, ConfigShortcut("ViewScript"));
     setGlobalShortcut(ui->actionSymbolInfo, ConfigShortcut("ViewSymbolInfo"));
+    setGlobalShortcut(ui->actionModules, ConfigShortcut("ViewModules"));
     setGlobalShortcut(ui->actionSource, ConfigShortcut("ViewSource"));
     setGlobalShortcut(ui->actionReferences, ConfigShortcut("ViewReferences"));
     setGlobalShortcut(ui->actionThreads, ConfigShortcut("ViewThreads"));
@@ -647,11 +847,12 @@ void MainWindow::refreshShortcuts()
     setGlobalShortcut(ui->actionBookmarks, ConfigShortcut("ViewBookmarks"));
     setGlobalShortcut(ui->actionFunctions, ConfigShortcut("ViewFunctions"));
     setGlobalShortcut(ui->actionVariables, ConfigShortcut("ViewVariables"));
-    setGlobalShortcut(ui->actionSnowman, ConfigShortcut("ViewSnowman"));
     setGlobalShortcut(ui->actionHandles, ConfigShortcut("ViewHandles"));
     setGlobalShortcut(ui->actionGraph, ConfigShortcut("ViewGraph"));
     setGlobalShortcut(ui->actionPreviousTab, ConfigShortcut("ViewPreviousTab"));
     setGlobalShortcut(ui->actionNextTab, ConfigShortcut("ViewNextTab"));
+    setGlobalShortcut(ui->actionPreviousView, ConfigShortcut("ViewPreviousHistory"));
+    setGlobalShortcut(ui->actionNextView, ConfigShortcut("ViewNextHistory"));
     setGlobalShortcut(ui->actionHideTab, ConfigShortcut("ViewHideTab"));
 
     setGlobalShortcut(ui->actionRun, ConfigShortcut("DebugRun"));
@@ -701,7 +902,6 @@ void MainWindow::refreshShortcuts()
     setGlobalShortcut(ui->actionAbout, ConfigShortcut("HelpAbout"));
     setGlobalShortcut(ui->actionBlog, ConfigShortcut("HelpBlog"));
     setGlobalShortcut(ui->actionDonate, ConfigShortcut("HelpDonate"));
-    setGlobalShortcut(ui->actionCheckUpdates, ConfigShortcut("HelpCheckForUpdates"));
     setGlobalShortcut(ui->actionCalculator, ConfigShortcut("HelpCalculator"));
     setGlobalShortcut(ui->actionReportBug, ConfigShortcut("HelpReportBug"));
     setGlobalShortcut(ui->actionManual, ConfigShortcut("HelpManual"));
@@ -740,7 +940,7 @@ void MainWindow::execCommandSlot()
 {
     QAction* action = qobject_cast<QAction*>(sender());
     if(action)
-        DbgCmdExec(action->data().toString().toUtf8().constData());
+        DbgCmdExec(action->data().toString());
 }
 
 void MainWindow::setFocusToCommandBar()
@@ -811,18 +1011,8 @@ void MainWindow::displayScriptWidget()
 
 void MainWindow::displayAboutWidget()
 {
-#ifdef _WIN64
-    QString title = tr("About x64dbg");
-#else
-    QString title = tr("About x32dbg");
-#endif //_WIN64
-    title += QString().sprintf(" v%d", BridgeGetDbgVersion());
-    QMessageBox msg(QMessageBox::Information, title, tr("Website:<br><a href=\"http://x64dbg.com\">http://x64dbg.com</a><br><br>Attribution:<br><a href=\"http://icons8.com\">Icons8</a><br><a href=\"http://p.yusukekamiyamane.com\">Yusuke Kamiyamane</a><br><br>Compiled on:<br>") + ToDateString(GetCompileDate()) + ", " __TIME__);
-    msg.setWindowIcon(DIcon("information.png"));
-    msg.setTextFormat(Qt::RichText);
-    msg.setParent(this, Qt::Dialog);
-    msg.setWindowFlags(msg.windowFlags() & (~Qt::WindowContextHelpButtonHint));
-    msg.exec();
+    AboutDialog dialog(mUpdateChecker, this);
+    dialog.exec();
 }
 
 void MainWindow::openFileSlot()
@@ -836,7 +1026,7 @@ void MainWindow::openFileSlot()
 
 void MainWindow::openRecentFileSlot(QString filename)
 {
-    DbgCmdExec(QString().sprintf("init \"%s\"", filename.toUtf8().constData()).toUtf8().constData());
+    DbgCmdExec(QString().sprintf("init \"%s\"", filename.toUtf8().constData()));
 }
 
 void MainWindow::runSlot()
@@ -851,7 +1041,7 @@ void MainWindow::restartDebugging()
 {
     auto last = mMRUList->getEntry(0);
     if(!last.isEmpty())
-        DbgCmdExec(QString("init \"%1\"").arg(last).toUtf8().constData());
+        DbgCmdExec(QString("init \"%1\"").arg(last));
 }
 
 void MainWindow::displayBreakpointWidget()
@@ -872,25 +1062,42 @@ void MainWindow::dropEvent(QDropEvent* pEvent)
     if(pEvent->mimeData()->hasUrls())
     {
         QString filename = QDir::toNativeSeparators(pEvent->mimeData()->urls()[0].toLocalFile());
-        DbgCmdExec(QString().sprintf("init \"%s\"", filename.toUtf8().constData()).toUtf8().constData());
+        DbgCmdExec(QString().sprintf("init \"%s\"", filename.toUtf8().constData()));
         pEvent->acceptProposedAction();
     }
+}
+
+bool MainWindow::event(QEvent* event)
+{
+    // just make sure mTabWidget take current view as the latest
+    if(event->type() == QEvent::WindowActivate && this->isActiveWindow())
+    {
+        mTabWidget->setCurrentIndex(mTabWidget->currentIndex());
+    }
+
+    return QMainWindow::event(event);
 }
 
 void MainWindow::updateWindowTitleSlot(QString filename)
 {
     if(filename.length())
     {
-        setWindowTitle(mWindowMainTitle + QString(" - ") + filename);
-        windowTitle = filename;
+        setWindowTitle(filename + QString(" - ") + mWindowMainTitle);
     }
     else
     {
         setWindowTitle(mWindowMainTitle);
-        windowTitle = mWindowMainTitle;
     }
 }
 
+// Used by View->CPU
+void MainWindow::displayCpuWidgetShowCpu()
+{
+    showQWidgetTab(mCpuWidget);
+    mCpuWidget->setDisasmFocus();
+}
+
+// GuiShowCpu()
 void MainWindow::displayCpuWidget()
 {
     showQWidgetTab(mCpuWidget);
@@ -916,14 +1123,10 @@ void MainWindow::displayThreadsWidget()
     showQWidgetTab(mThreadView);
 }
 
-void MainWindow::displaySnowmanWidget()
-{
-    showQWidgetTab(mSnowmanView);
-}
-
 void MainWindow::displayGraphWidget()
 {
-    showQWidgetTab(mGraphView);
+    showQWidgetTab(mCpuWidget);
+    mCpuWidget->setGraphFocus();
 }
 
 void MainWindow::displayPreviousTab()
@@ -936,6 +1139,16 @@ void MainWindow::displayNextTab()
     mTabWidget->showNextTab();
 }
 
+void MainWindow::displayPreviousView()
+{
+    mTabWidget->showPreviousView();
+}
+
+void MainWindow::displayNextView()
+{
+    mTabWidget->showNextView();
+}
+
 void MainWindow::hideTab()
 {
     mTabWidget->deleteCurrentTab();
@@ -943,10 +1156,10 @@ void MainWindow::hideTab()
 
 void MainWindow::openSettings()
 {
-    SettingsDialog* settings = new SettingsDialog(this);
-    connect(settings, SIGNAL(chkSaveLoadTabOrderStateChanged(bool)), this, SLOT(chkSaveloadTabSavedOrderStateChangedSlot(bool)));
-    settings->lastException = lastException;
-    settings->exec();
+    SettingsDialog settings(this);
+    connect(&settings, SIGNAL(chkSaveLoadTabOrderStateChanged(bool)), this, SLOT(chkSaveloadTabSavedOrderStateChangedSlot(bool)));
+    settings.lastException = lastException;
+    settings.exec();
 }
 
 void MainWindow::openAppearance()
@@ -990,13 +1203,13 @@ void MainWindow::setLastException(unsigned int exceptionCode)
 
 void MainWindow::findStrings()
 {
-    DbgCmdExec(QString("strref " + ToPtrString(mCpuWidget->getDisasmWidget()->getSelectedVa())).toUtf8().constData());
+    DbgCmdExec(QString("strref " + ToPtrString(mCpuWidget->getDisasmWidget()->getSelectedVa())));
     displayReferencesWidget();
 }
 
 void MainWindow::findModularCalls()
 {
-    DbgCmdExec(QString("modcallfind " + ToPtrString(mCpuWidget->getDisasmWidget()->getSelectedVa())).toUtf8().constData());
+    DbgCmdExec(QString("modcallfind " + ToPtrString(mCpuWidget->getDisasmWidget()->getSelectedVa())));
     displayReferencesWidget();
 }
 
@@ -1016,11 +1229,11 @@ const MainWindow::MenuInfo* MainWindow::findMenu(int hMenu)
     return nFound == -1 ? 0 : &mMenuList.at(nFound);
 }
 
-void MainWindow::addMenuToList(QWidget* parent, QMenu* menu, int hMenu, int hParentMenu)
+void MainWindow::addMenuToList(QWidget* parent, QMenu* menu, GUIMENUTYPE hMenu, int hParentMenu)
 {
     if(!findMenu(hMenu))
         mMenuList.push_back(MenuInfo(parent, menu, hMenu, hParentMenu, hMenu == GUI_PLUGIN_MENU));
-    Bridge::getBridge()->setResult();
+    Bridge::getBridge()->setResult(BridgeResult::MenuAddToList);
 }
 
 void MainWindow::addMenu(int hMenu, QString title)
@@ -1028,14 +1241,14 @@ void MainWindow::addMenu(int hMenu, QString title)
     const MenuInfo* menu = findMenu(hMenu);
     if(!menu && hMenu != -1)
     {
-        Bridge::getBridge()->setResult(-1);
+        Bridge::getBridge()->setResult(BridgeResult::MenuAdd, -1);
         return;
     }
-    int hMenuNew = hMenuNext++;
+    int hMenuNew = hEntryMenuPool++;
     QWidget* parent = hMenu == -1 ? this : menu->parent;
     QMenu* wMenu = new QMenu(title, parent);
     wMenu->menuAction()->setVisible(false);
-    mMenuList.push_back(MenuInfo(parent, wMenu, hMenuNew, hMenu, menu->globalMenu));
+    mMenuList.push_back(MenuInfo(parent, wMenu, hMenuNew, hMenu, !menu || menu->globalMenu));
     if(hMenu == -1) //top-level
         ui->menuBar->addMenu(wMenu);
     else //deeper level
@@ -1043,7 +1256,7 @@ void MainWindow::addMenu(int hMenu, QString title)
         menu->mMenu->addMenu(wMenu);
         menu->mMenu->menuAction()->setVisible(true);
     }
-    Bridge::getBridge()->setResult(hMenuNew);
+    Bridge::getBridge()->setResult(BridgeResult::MenuAdd, hMenuNew);
 }
 
 void MainWindow::addMenuEntry(int hMenu, QString title)
@@ -1051,17 +1264,18 @@ void MainWindow::addMenuEntry(int hMenu, QString title)
     const MenuInfo* menu = findMenu(hMenu);
     if(!menu && hMenu != -1)
     {
-        Bridge::getBridge()->setResult(-1);
+        Bridge::getBridge()->setResult(BridgeResult::MenuAddEntry, -1);
         return;
     }
     MenuEntryInfo newInfo;
-    int hEntryNew = hEntryNext++;
+    int hEntryNew = hEntryMenuPool++;
     newInfo.hEntry = hEntryNew;
     newInfo.hParentMenu = hMenu;
     QWidget* parent = hMenu == -1 ? this : menu->parent;
     QAction* wAction = new QAction(title, parent);
+    parent->addAction(wAction);
     wAction->setObjectName(QString().sprintf("ENTRY|%d", hEntryNew));
-    wAction->setShortcutContext(menu->globalMenu ? Qt::ApplicationShortcut : Qt::WidgetShortcut);
+    wAction->setShortcutContext((!menu || menu->globalMenu) ? Qt::ApplicationShortcut : Qt::WidgetShortcut);
     parent->addAction(wAction);
     connect(wAction, SIGNAL(triggered()), this, SLOT(menuEntrySlot()));
     newInfo.mAction = wAction;
@@ -1073,7 +1287,7 @@ void MainWindow::addMenuEntry(int hMenu, QString title)
         menu->mMenu->addAction(wAction);
         menu->mMenu->menuAction()->setVisible(true);
     }
-    Bridge::getBridge()->setResult(hEntryNew);
+    Bridge::getBridge()->setResult(BridgeResult::MenuAddEntry, hEntryNew);
 }
 
 void MainWindow::addSeparator(int hMenu)
@@ -1087,51 +1301,72 @@ void MainWindow::addSeparator(int hMenu)
         newInfo.mAction = menu->mMenu->addSeparator();
         mEntryList.push_back(newInfo);
     }
-    Bridge::getBridge()->setResult();
+    Bridge::getBridge()->setResult(BridgeResult::MenuAddSeparator);
 }
 
-void MainWindow::clearMenu(int hMenu)
+void MainWindow::clearMenuHelper(int hMenu)
 {
-    if(!mMenuList.size() || hMenu == -1)
-    {
-        Bridge::getBridge()->setResult();
-        return;
-    }
-    const MenuInfo* menu = findMenu(hMenu);
     //delete menu entries
-    for(int i = mEntryList.size() - 1; i > -1; i--)
-    {
+    for(auto i = mEntryList.size() - 1; i != -1; i--)
         if(hMenu == mEntryList.at(i).hParentMenu) //we found an entry that has the menu as parent
-        {
-            QWidget* parent = menu == 0 ? this : menu->parent;
-            parent->removeAction(mEntryList.at(i).mAction);
-            delete mEntryList.at(i).mAction; //delete the entry object
             mEntryList.erase(mEntryList.begin() + i);
-        }
-    }
-    //recursively delete the menus
-    for(int i = mMenuList.size() - 1; i > -1; i--)
+    //delete the menus
+    std::vector<int> menuClearQueue;
+    for(auto i = mMenuList.size() - 1; i != -1; i--)
     {
         if(hMenu == mMenuList.at(i).hParentMenu) //we found a menu that has the menu as parent
         {
-            clearMenu(mMenuList.at(i).hMenu); //delete children menus
-            delete mMenuList.at(i).mMenu; //delete the child menu object
-            mMenuList.erase(mMenuList.begin() + i); //delete the child entry
+            menuClearQueue.push_back(mMenuList.at(i).hMenu);
+            mMenuList.erase(mMenuList.begin() + i);
         }
     }
-    //hide the empty menu
-    if(menu)
-        menu->mMenu->menuAction()->setVisible(false);
-    Bridge::getBridge()->setResult();
+    //recursively clear the menus
+    for(auto & hMenu : menuClearQueue)
+        clearMenuHelper(hMenu);
+}
+
+void MainWindow::clearMenuImpl(int hMenu, bool erase)
+{
+    //this recursively removes the entries from mEntryList and mMenuList
+    clearMenuHelper(hMenu);
+    for(auto it = mMenuList.begin(); it != mMenuList.end(); ++it)
+    {
+        auto & curMenu = *it;
+        if(hMenu == curMenu.hMenu)
+        {
+            if(erase)
+            {
+                auto parentMenu = findMenu(curMenu.hParentMenu);
+                if(parentMenu)
+                {
+                    parentMenu->mMenu->removeAction(curMenu.mMenu->menuAction()); //remove the QMenu from the parent
+                    if(parentMenu->mMenu->actions().empty()) //hide the parent if it is now empty
+                        parentMenu->mMenu->menuAction()->setVisible(false);
+                }
+                it = mMenuList.erase(it);
+            }
+            else
+            {
+                curMenu.mMenu->clear(); //clear the QMenu
+                curMenu.mMenu->menuAction()->setVisible(false);
+            }
+            break;
+        }
+    }
+}
+
+void MainWindow::clearMenu(int hMenu, bool erase)
+{
+    clearMenuImpl(hMenu, erase);
+    Bridge::getBridge()->setResult(BridgeResult::MenuClear);
 }
 
 void MainWindow::initMenuApi()
 {
     //256 entries are reserved
-    mEntryList.clear();
-    hEntryNext = 256;
-    mMenuList.clear();
-    hMenuNext = 256;
+    hEntryMenuPool = 256;
+    mEntryList.reserve(1024);
+    mMenuList.reserve(1024);
 }
 
 void MainWindow::menuEntrySlot()
@@ -1145,22 +1380,29 @@ void MainWindow::menuEntrySlot()
     }
 }
 
-void MainWindow::removeMenuEntry(int hEntry)
+void MainWindow::removeMenuEntry(int hEntryMenu)
 {
+    //find and remove the hEntryMenu from the mEntryList
     for(int i = 0; i < mEntryList.size(); i++)
     {
-        if(mEntryList.at(i).hEntry == hEntry)
+        if(mEntryList.at(i).hEntry == hEntryMenu)
         {
-            const MenuEntryInfo & entry = mEntryList.at(i);
-            const MenuInfo* menu = findMenu(entry.hParentMenu);
-            QWidget* parent = menu == 0 ? this : menu->parent;
-            parent->removeAction(entry.mAction);
-            delete entry.mAction;
-            mEntryList.erase(mEntryList.begin() + i);
-            break;
+            auto & entry = mEntryList.at(i);
+            auto parentMenu = findMenu(entry.hParentMenu);
+            if(parentMenu)
+            {
+                parentMenu->mMenu->removeAction(entry.mAction);
+                if(parentMenu->mMenu->actions().empty())
+                    parentMenu->mMenu->menuAction()->setVisible(false);
+                mEntryList.erase(mEntryList.begin() + i);
+            }
+            Bridge::getBridge()->setResult(BridgeResult::MenuRemove);
+            return;
         }
     }
-    Bridge::getBridge()->setResult();
+    //if hEntryMenu is not in mEntryList, clear+erase it from mMenuList
+    clearMenuImpl(hEntryMenu, true);
+    Bridge::getBridge()->setResult(BridgeResult::MenuRemove);
 }
 
 void MainWindow::setIconMenuEntry(int hEntry, QIcon icon)
@@ -1174,7 +1416,7 @@ void MainWindow::setIconMenuEntry(int hEntry, QIcon icon)
             break;
         }
     }
-    Bridge::getBridge()->setResult();
+    Bridge::getBridge()->setResult(BridgeResult::MenuSetEntryIcon);
 }
 
 void MainWindow::setIconMenu(int hMenu, QIcon icon)
@@ -1187,7 +1429,7 @@ void MainWindow::setIconMenu(int hMenu, QIcon icon)
             menu.mMenu->setIcon(icon);
         }
     }
-    Bridge::getBridge()->setResult();
+    Bridge::getBridge()->setResult(BridgeResult::MenuSetIcon);
 }
 
 void MainWindow::setCheckedMenuEntry(int hEntry, bool checked)
@@ -1202,7 +1444,7 @@ void MainWindow::setCheckedMenuEntry(int hEntry, bool checked)
             break;
         }
     }
-    Bridge::getBridge()->setResult();
+    Bridge::getBridge()->setResult(BridgeResult::MenuSetEntryChecked);
 }
 
 QString MainWindow::nestedMenuDescription(const MenuInfo* menu)
@@ -1251,7 +1493,7 @@ void MainWindow::setHotkeyMenuEntry(int hEntry, QString hotkey, QString id)
             break;
         }
     }
-    Bridge::getBridge()->setResult();
+    Bridge::getBridge()->setResult(BridgeResult::MenuSetEntryHotkey);
 }
 
 void MainWindow::setVisibleMenuEntry(int hEntry, bool visible)
@@ -1265,7 +1507,7 @@ void MainWindow::setVisibleMenuEntry(int hEntry, bool visible)
             break;
         }
     }
-    Bridge::getBridge()->setResult();
+    Bridge::getBridge()->setResult(BridgeResult::MenuSetEntryVisible);
 }
 
 void MainWindow::setVisibleMenu(int hMenu, bool visible)
@@ -1278,7 +1520,7 @@ void MainWindow::setVisibleMenu(int hMenu, bool visible)
             menu.mMenu->setVisible(visible);
         }
     }
-    Bridge::getBridge()->setResult();
+    Bridge::getBridge()->setResult(BridgeResult::MenuSetVisible);
 }
 
 void MainWindow::setNameMenuEntry(int hEntry, QString name)
@@ -1293,7 +1535,7 @@ void MainWindow::setNameMenuEntry(int hEntry, QString name)
             break;
         }
     }
-    Bridge::getBridge()->setResult();
+    Bridge::getBridge()->setResult(BridgeResult::MenuSetEntryName);
 }
 
 void MainWindow::setNameMenu(int hMenu, QString name)
@@ -1306,13 +1548,21 @@ void MainWindow::setNameMenu(int hMenu, QString name)
             menu.mMenu->setTitle(name);
         }
     }
-    Bridge::getBridge()->setResult();
+    Bridge::getBridge()->setResult(BridgeResult::MenuSetName);
 }
 
 void MainWindow::runSelection()
 {
     if(DbgIsDebugging())
-        DbgCmdExec(("run " + ToPtrString(mGraphView->hasFocus() ? mGraphView->get_cursor_pos() : mCpuWidget->getDisasmWidget()->getSelectedVa())).toUtf8().constData());
+    {
+        duint addr = 0;
+        if(mTabWidget->currentWidget() == mCpuWidget || (mCpuWidget->window() != this && mCpuWidget->isActiveWindow()))
+            addr = mCpuWidget->getSelectionVa();
+        else if(mTabWidget->currentWidget() == mCallStackView || (mCallStackView->window() != this && mCallStackView->isActiveWindow()))
+            addr = mCallStackView->getSelectionVa();
+        if(addr)
+            DbgCmdExec("run " + ToPtrString(addr));
+    }
 }
 
 void MainWindow::runExpression()
@@ -1337,7 +1587,7 @@ void MainWindow::getStrWindow(const QString title, QString* text)
     if(mLineEdit.exec() != QDialog::Accepted)
         bResult = false;
     *text = mLineEdit.editText;
-    Bridge::getBridge()->setResult(bResult);
+    Bridge::getBridge()->setResult(BridgeResult::GetlineWindow, bResult);
 }
 
 void MainWindow::patchWindow()
@@ -1384,11 +1634,6 @@ void MainWindow::displayFunctions()
     displayReferencesWidget();
 }
 
-void MainWindow::checkUpdates()
-{
-    mUpdateChecker->checkForUpdates();
-}
-
 void MainWindow::displayCallstack()
 {
     showQWidgetTab(mCallStackView);
@@ -1397,6 +1642,11 @@ void MainWindow::displayCallstack()
 void MainWindow::displaySEHChain()
 {
     showQWidgetTab(mSEHChainView);
+}
+
+void MainWindow::displayRunTrace()
+{
+    showQWidgetTab(mTraceWidget);
 }
 
 void MainWindow::donate()
@@ -1515,9 +1765,15 @@ void MainWindow::changeCommandLine()
 
 void MainWindow::displayManual()
 {
-    // Open the Windows CHM in the upper directory
-    if(!QDesktopServices::openUrl(QUrl(QUrl::fromLocalFile(QString("%1/../x64dbg.chm").arg(QCoreApplication::applicationDirPath())))))
-        SimpleErrorBox(this, tr("Error"), tr("Manual cannot be opened. Please check if x64dbg.chm exists and ensure there is no other problems with your system."));
+    duint setting = 0;
+    if(BridgeSettingGetUint("Misc", "UseLocalHelpFile", &setting) && setting)
+    {
+        // Open the Windows CHM in the upper directory
+        if(!QDesktopServices::openUrl(QUrl(QUrl::fromLocalFile(QString("%1/../x64dbg.chm").arg(QCoreApplication::applicationDirPath())))))
+            SimpleErrorBox(this, tr("Error"), tr("Manual cannot be opened. Please check if x64dbg.chm exists and ensure there is no other problems with your system."));
+    }
+    else
+        QDesktopServices::openUrl(QUrl("http://help.x64dbg.com"));
 }
 
 void MainWindow::canClose()
@@ -1533,7 +1789,9 @@ void MainWindow::addQWidgetTab(QWidget* qWidget, QString nativeName)
 
 void MainWindow::addQWidgetTab(QWidget* qWidget)
 {
-    addQWidgetTab(qWidget, qWidget->windowTitle());
+    WidgetInfo info(qWidget, qWidget->metaObject()->className());
+    addQWidgetTab(info.widget, info.nativeName);
+    mPluginWidgetList.append(info);
 }
 
 void MainWindow::showQWidgetTab(QWidget* qWidget)
@@ -1555,19 +1813,26 @@ void MainWindow::closeQWidgetTab(QWidget* qWidget)
     }
 }
 
-void MainWindow::executeOnGuiThread(void* cbGuiThread)
+void MainWindow::executeOnGuiThread(void* cbGuiThread, void* userdata)
 {
-    ((GUICALLBACK)cbGuiThread)();
+    ((GUICALLBACKEX)cbGuiThread)(userdata);
 }
 
 void MainWindow::tabMovedSlot(int from, int to)
 {
+    Q_UNUSED(from);
+    Q_UNUSED(to);
     for(int i = 0; i < mTabWidget->count(); i++)
     {
         // Remove space in widget name and append Tab to get config settings (CPUTab, MemoryMapTab, etc...)
         //QString tabName = mTabWidget->tabText(i).replace(" ", "") + "Tab";
         QString tabName = mTabWidget->getNativeName(i);
-        Config()->setUint("TabOrder", tabName, i);
+        auto found = std::find_if(mWidgetList.begin(), mWidgetList.end(), [&tabName](const WidgetInfo & info)
+        {
+            return info.nativeName == tabName;
+        });
+        if(found != mWidgetList.end())
+            Config()->setUint("TabOrder", tabName, i);
     }
 }
 
@@ -1592,16 +1857,7 @@ void MainWindow::on_actionFaq_triggered()
 
 void MainWindow::on_actionReloadStylesheet_triggered()
 {
-    QFile f(QString("%1/style.css").arg(QCoreApplication::applicationDirPath()));
-    if(f.open(QFile::ReadOnly | QFile::Text))
-    {
-        QTextStream in(&f);
-        auto style = in.readAll();
-        f.close();
-        qApp->setStyleSheet(style);
-    }
-    else
-        qApp->setStyleSheet("");
+    loadSelectedStyle(true);
     ensurePolished();
     update();
 }
@@ -1623,36 +1879,79 @@ void MainWindow::manageFavourites()
     updateFavouriteTools();
 }
 
+static void splitToolPath(const QString & toolPath, QString & file, QString & cmd)
+{
+    if(toolPath.startsWith('\"'))
+    {
+        auto endQuote = toolPath.indexOf('\"', 1);
+        if(endQuote == -1) //"failure with spaces
+            file = toolPath.mid(1);
+        else //"path with spaces" arguments
+        {
+            file = toolPath.mid(1, endQuote - 1);
+            cmd = toolPath.mid(endQuote + 1);
+        }
+    }
+    else
+    {
+        auto firstSpace = toolPath.indexOf(' ');
+        if(firstSpace == -1) //pathwithoutspaces
+            file = toolPath;
+        else //pathwithoutspaces argument
+        {
+            file = toolPath.left(firstSpace);
+            cmd = toolPath.mid(firstSpace + 1);
+        }
+    }
+    file = file.trimmed();
+    cmd = cmd.trimmed();
+}
+
 void MainWindow::updateFavouriteTools()
 {
     char buffer[MAX_SETTING_SIZE];
     bool isanythingexists = false;
     ui->menuFavourites->clear();
+    delete actionManageFavourites;
+    mFavouriteToolbar->clear();
+    actionManageFavourites = new QAction(DIcon("star.png"), tr("&Manage Favourite Tools..."), this);
     for(unsigned int i = 1; BridgeSettingGet("Favourite", QString("Tool%1").arg(i).toUtf8().constData(), buffer); i++)
     {
-        QString exePath = QString(buffer);
-        QAction* newAction = new QAction(this);
-        newAction->setData(QVariant(QString("Tool,%1").arg(exePath)));
+        QString toolPath = QString(buffer);
+        QAction* newAction = new QAction(actionManageFavourites); // Auto delete these actions on updateFavouriteTools()
+        // Set up user data to be used in clickFavouriteTool()
+        newAction->setData(QVariant(QString("Tool,%1").arg(toolPath)));
         if(BridgeSettingGet("Favourite", QString("ToolShortcut%1").arg(i).toUtf8().constData(), buffer))
             if(*buffer && strcmp(buffer, "NOT_SET") != 0)
                 setGlobalShortcut(newAction, QKeySequence(QString(buffer)));
         if(BridgeSettingGet("Favourite", QString("ToolDescription%1").arg(i).toUtf8().constData(), buffer))
             newAction->setText(QString(buffer));
         else
-            newAction->setText(exePath);
+            newAction->setText(toolPath);
+        // Get the icon of the executable
+        QString file, cmd;
+        QIcon icon;
+        splitToolPath(toolPath, file, cmd);
+        icon = getFileIcon(file);
+        if(icon.isNull())
+            icon = DIcon("plugin.png");
+        newAction->setIcon(icon);
         connect(newAction, SIGNAL(triggered()), this, SLOT(clickFavouriteTool()));
         ui->menuFavourites->addAction(newAction);
+        mFavouriteToolbar->addAction(newAction);
         isanythingexists = true;
     }
     if(isanythingexists)
     {
         isanythingexists = false;
         ui->menuFavourites->addSeparator();
+        mFavouriteToolbar->addSeparator();
     }
     for(unsigned int i = 1; BridgeSettingGet("Favourite", QString("Script%1").arg(i).toUtf8().constData(), buffer); i++)
     {
         QString scriptPath = QString(buffer);
-        QAction* newAction = new QAction(this);
+        QAction* newAction = new QAction(actionManageFavourites);
+        // Set up user data to be used in clickFavouriteTool()
         newAction->setData(QVariant(QString("Script,%1").arg(scriptPath)));
         if(BridgeSettingGet("Favourite", QString("ScriptShortcut%1").arg(i).toUtf8().constData(), buffer))
             if(*buffer && strcmp(buffer, "NOT_SET") != 0)
@@ -1662,37 +1961,47 @@ void MainWindow::updateFavouriteTools()
         else
             newAction->setText(scriptPath);
         connect(newAction, SIGNAL(triggered()), this, SLOT(clickFavouriteTool()));
+        newAction->setIcon(DIcon("script-code.png"));
         ui->menuFavourites->addAction(newAction);
+        mFavouriteToolbar->addAction(newAction);
         isanythingexists = true;
     }
     if(isanythingexists)
     {
         isanythingexists = false;
         ui->menuFavourites->addSeparator();
+        mFavouriteToolbar->addSeparator();
     }
     for(unsigned int i = 1; BridgeSettingGet("Favourite", QString("Command%1").arg(i).toUtf8().constData(), buffer); i++)
     {
-        QAction* newAction = new QAction(QString(buffer), this);
+        QAction* newAction = new QAction(QString(buffer), actionManageFavourites);
+        // Set up user data to be used in clickFavouriteTool()
         newAction->setData(QVariant(QString("Command")));
         if(BridgeSettingGet("Favourite", QString("CommandShortcut%1").arg(i).toUtf8().constData(), buffer))
             if(*buffer && strcmp(buffer, "NOT_SET") != 0)
                 setGlobalShortcut(newAction, QKeySequence(QString(buffer)));
         connect(newAction, SIGNAL(triggered()), this, SLOT(clickFavouriteTool()));
+        newAction->setIcon(DIcon("star.png"));
         ui->menuFavourites->addAction(newAction);
+        mFavouriteToolbar->addAction(newAction);
         isanythingexists = true;
     }
     if(isanythingexists)
+    {
         ui->menuFavourites->addSeparator();
-    actionManageFavourites = new QAction(DIcon("star.png"), tr("&Manage Favourite Tools..."), this);
+        mFavouriteToolbar->addSeparator();
+    }
     ui->menuFavourites->addAction(actionManageFavourites);
     setGlobalShortcut(actionManageFavourites, ConfigShortcut("FavouritesManage"));
     connect(ui->menuFavourites->actions().last(), SIGNAL(triggered()), this, SLOT(manageFavourites()));
+    mFavouriteToolbar->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    ui->menuFavourites->addAction(mFavouriteToolbar->toggleViewAction());
 }
 
 static QString stringFormatInline(const QString & format)
 {
     if(!DbgFunctions()->StringFormatInline)
-        return "";
+        return QString();
     char result[MAX_SETTING_SIZE] = "";
     if(DbgFunctions()->StringFormatInline(format.toUtf8().constData(), MAX_SETTING_SIZE, result))
         return result;
@@ -1729,9 +2038,17 @@ void MainWindow::clickFavouriteTool()
         memset(&procinfo, 0, sizeof(PROCESS_INFORMATION));
         memset(&startupinfo, 0, sizeof(startupinfo));
         startupinfo.cb = sizeof(startupinfo);
-        CreateProcessW(nullptr, (LPWSTR)toolPath.toStdWString().c_str(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startupinfo, &procinfo);
-        CloseHandle(procinfo.hThread);
-        CloseHandle(procinfo.hProcess);
+        if(CreateProcessW(nullptr, (LPWSTR)toolPath.toStdWString().c_str(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startupinfo, &procinfo))
+        {
+            CloseHandle(procinfo.hThread);
+            CloseHandle(procinfo.hProcess);
+        }
+        else if(GetLastError() == ERROR_ELEVATION_REQUIRED)
+        {
+            QString file, cmd;
+            splitToolPath(toolPath, file, cmd);
+            ShellExecuteW(nullptr, L"runas", file.toStdWString().c_str(), cmd.toStdWString().c_str(), nullptr, SW_SHOWNORMAL);
+        }
     }
     else if(data.startsWith("Script,"))
     {
@@ -1741,7 +2058,7 @@ void MainWindow::clickFavouriteTool()
     }
     else if(data.compare("Command") == 0)
     {
-        DbgCmdExec(action->text().toUtf8().constData());
+        DbgCmdExec(action->text());
     }
 }
 
@@ -1867,26 +2184,8 @@ void MainWindow::animateCommandSlot()
 
 void MainWindow::setInitializationScript()
 {
-    QString global, debuggee;
-    char globalChar[MAX_SETTING_SIZE];
-    if(DbgIsDebugging())
-    {
-        debuggee = QString(DbgFunctions()->DbgGetDebuggeeInitScript());
-        BrowseDialog browseScript(this, tr("Set Initialization Script for Debuggee"), tr("Set Initialization Script for Debuggee"), tr("Script files (*.txt *.scr);;All files (*.*)"), debuggee, false);
-        browseScript.setWindowIcon(DIcon("initscript.png"));
-        if(browseScript.exec() == QDialog::Accepted)
-            DbgFunctions()->DbgSetDebuggeeInitScript(browseScript.path.toUtf8().constData());
-    }
-    if(BridgeSettingGet("Engine", "InitializeScript", globalChar))
-        global = QString(globalChar);
-    else
-        global = QString();
-    BrowseDialog browseScript(this, tr("Set Global Initialization Script"), tr("Set Global Initialization Script"), tr("Script files (*.txt *.scr);;All files (*.*)"), global, false);
-    browseScript.setWindowIcon(DIcon("initscript.png"));
-    if(browseScript.exec() == QDialog::Accepted)
-    {
-        BridgeSettingSet("Engine", "InitializeScript", browseScript.path.toUtf8().constData());
-    }
+    SystemBreakpointScriptDialog dialog(this);
+    dialog.exec();
 }
 
 void MainWindow::customizeMenu()
@@ -1898,49 +2197,22 @@ void MainWindow::customizeMenu()
     onMenuCustomized();
 }
 
-#include "../src/bridge/Utf8Ini.h"
-
 void MainWindow::on_actionImportSettings_triggered()
 {
     auto filename = QFileDialog::getOpenFileName(this, tr("Open file"), QCoreApplication::applicationDirPath(), tr("Settings (*.ini);;All files (*.*)"));
     if(!filename.length())
         return;
-    QFile f(QDir::toNativeSeparators(filename));
-    if(f.open(QFile::ReadOnly | QFile::Text))
-    {
-        QTextStream in(&f);
-        auto style = in.readAll();
-        f.close();
-        Utf8Ini ini;
-        int errorLine;
-        if(ini.Deserialize(style.toStdString(), errorLine))
-        {
-            auto sections = ini.Sections();
-            for(const auto & section : sections)
-            {
-                auto keys = ini.Keys(section);
-                for(const auto & key : keys)
-                    BridgeSettingSet(section.c_str(), key.c_str(), ini.GetValue(section, key).c_str());
-            }
-            Config()->load();
-            DbgSettingsUpdated();
-            Config()->emitColorsUpdated();
-            Config()->emitFontsUpdated();
-            Config()->emitShortcutsUpdated();
-            Config()->emitTokenizerConfigUpdated();
-            GuiUpdateAllViews();
-        }
-    }
+    importSettings(filename);
 }
 
 void MainWindow::on_actionImportdatabase_triggered()
 {
     if(!DbgIsDebugging())
         return;
-    auto filename = QFileDialog::getOpenFileName(this, tr("Import database"), QString(), tr("Databases (%1);;All files (*.*)").arg(ArchValue("*.dd32", "*.dd64")));
+    auto filename = QFileDialog::getOpenFileName(this, tr("Import database"), QString(), tr("Databases (%1);;Database backup (%1.bak);;All files (*.*)").arg(ArchValue("*.dd32", "*.dd64")));
     if(!filename.length())
         return;
-    DbgCmdExec(QString("dbload \"%1\"").arg(QDir::toNativeSeparators(filename)).toUtf8().constData());
+    DbgCmdExec(QString("dbload \"%1\"").arg(QDir::toNativeSeparators(filename)));
 }
 
 void MainWindow::on_actionExportdatabase_triggered()
@@ -1950,7 +2222,7 @@ void MainWindow::on_actionExportdatabase_triggered()
     auto filename = QFileDialog::getSaveFileName(this, tr("Export database"), QString(), tr("Databases (%1);;All files (*.*)").arg(ArchValue("*.dd32", "*.dd64")));
     if(!filename.length())
         return;
-    DbgCmdExec(QString("dbsave \"%1\"").arg(QDir::toNativeSeparators(filename)).toUtf8().constData());
+    DbgCmdExec(QString("dbsave \"%1\"").arg(QDir::toNativeSeparators(filename)));
 }
 
 static void setupMenuCustomizationHelper(QMenu* parentMenu, QList<QAction*> & stringList)
@@ -1995,7 +2267,7 @@ void MainWindow::onMenuCustomized()
         QMenu* currentMenu = menus[i];
         QMenu* moreCommands = nullptr;
         bool moreCommandsUsed = false;
-        QList<QAction*> & list = currentMenu->actions();
+        QList<QAction*> list = currentMenu->actions();
         moreCommands = list.last()->menu();
         if(moreCommands && moreCommands->title().compare(tr("More Commands")) == 0)
         {
@@ -2042,4 +2314,33 @@ void MainWindow::on_actionRestartAdmin_triggered()
 void MainWindow::on_actionPlugins_triggered()
 {
     QDesktopServices::openUrl(QUrl("http://plugins.x64dbg.com"));
+}
+
+void MainWindow::on_actionCheckUpdates_triggered()
+{
+    mUpdateChecker->checkForUpdates();
+}
+
+void MainWindow::on_actionDefaultTheme_triggered()
+{
+    // Delete [Theme] Selected
+    BridgeSettingSet("Theme", "Selected", nullptr);
+    // Load style
+    loadSelectedStyle();
+    // Reset [Colors] to default
+    Config()->Colors = Config()->defaultColors;
+    Config()->writeColors();
+    // Reset [Fonts] to default
+    //Config()->Fonts = Config()->defaultFonts;
+    //Config()->writeFonts();
+    // Remove custom colors
+    BridgeSettingSet("Colors", "CustomColorCount", nullptr);
+}
+
+void MainWindow::updateStyle()
+{
+    // Set configured link color
+    QPalette appPalette = QApplication::palette();
+    appPalette.setColor(QPalette::Link, ConfigColor("LinkColor"));
+    QApplication::setPalette(appPalette);
 }

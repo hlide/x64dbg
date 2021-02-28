@@ -2,12 +2,14 @@
 #define _BREAKPOINT_H
 
 #include "_global.h"
+#include "jansson/jansson_x64dbg.h"
 
-#define TITANSETDRX(titantype, drx) titantype &= 0x0FF; titantype |= (drx<<8)
-#define TITANGETDRX(titantype) (titantype >> 8) & 0xF
-#define TITANSETTYPE(titantype, type) titantype &= 0xF0F; titantype |= (type<<4)
+#define TITANSETDRX(titantype, drx) titantype &= 0x0FF, titantype |= (((drx - UE_DR0) & 0xF) << 8)
+#define TITANGETDRX(titantype) UE_DR0 + ((titantype >> 8) & 0xF)
+#define TITANDRXVALID(titantype) TITANGETDRX(titantype) != UE_DR7
+#define TITANSETTYPE(titantype, type) titantype &= 0xF0F, titantype |= ((type & 0xF) << 4)
 #define TITANGETTYPE(titantype) (titantype >> 4) & 0xF
-#define TITANSETSIZE(titantype, size) titantype &= 0xFF0; titantype |= size;
+#define TITANSETSIZE(titantype, size) titantype &= 0xFF0, titantype |= (size & 0xF);
 #define TITANGETSIZE(titantype) titantype & 0xF
 
 enum BP_TYPE
@@ -38,6 +40,7 @@ struct BREAKPOINT
     char commandCondition[MAX_CONDITIONAL_EXPR_SIZE]; // condition to execute the command
     uint32 hitcount;                                  // hit counter
     bool fastResume;                                  // if true, debugger resumes without any GUI/Script/Plugin interaction.
+    duint memsize;                                    // memory breakpoint size (not implemented)
 };
 
 // Breakpoint enumeration callback
@@ -45,7 +48,7 @@ typedef bool (*BPENUMCALLBACK)(const BREAKPOINT* bp);
 
 BREAKPOINT* BpInfoFromAddr(BP_TYPE Type, duint Address);
 int BpGetList(std::vector<BREAKPOINT>* List);
-bool BpNew(duint Address, bool Enable, bool Singleshot, short OldBytes, BP_TYPE Type, DWORD TitanType, const char* Name);
+bool BpNew(duint Address, bool Enable, bool Singleshot, short OldBytes, BP_TYPE Type, DWORD TitanType, const char* Name, duint memsize = 0);
 bool BpNewDll(const char* module, bool Enable, bool Singleshot, DWORD TitanType, const char* Name);
 bool BpGet(duint Address, BP_TYPE Type, const char* Name, BREAKPOINT* Bp);
 bool BpGetAny(BP_TYPE Type, const char* Name, BREAKPOINT* Bp);

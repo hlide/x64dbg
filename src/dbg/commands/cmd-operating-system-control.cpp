@@ -3,6 +3,7 @@
 #include "debugger.h"
 #include "exception.h"
 #include "value.h"
+#include "stringformat.h"
 
 bool cbGetPrivilegeState(int argc, char* argv[])
 {
@@ -85,7 +86,8 @@ bool cbHandleClose(int argc, char* argv[])
         return false;
     if(!handle || !DuplicateHandle(fdProcessInfo->hProcess, HANDLE(handle), NULL, NULL, 0, FALSE, DUPLICATE_CLOSE_SOURCE))
     {
-        dprintf(QT_TRANSLATE_NOOP("DBG", "DuplicateHandle failed: %s\n"), ErrorCodeToName(GetLastError()).c_str());
+        String error = stringformatinline(StringUtils::sprintf("{winerror@%d}", GetLastError()));
+        dprintf(QT_TRANSLATE_NOOP("DBG", "DuplicateHandle failed: %s\n"), error.c_str());
         return false;
     }
 #ifdef _WIN64
@@ -93,5 +95,33 @@ bool cbHandleClose(int argc, char* argv[])
 #else //x86
     dprintf(QT_TRANSLATE_NOOP("DBG", "Handle %X closed!\n"), handle);
 #endif
+    return true;
+}
+
+bool cbEnableWindow(int argc, char* argv[])
+{
+    if(IsArgumentsLessThan(argc, 2))
+        return false;
+    duint handle;
+    if(!valfromstring(argv[1], &handle, false))
+        return false;
+
+    if(!IsWindowEnabled((HWND)handle))
+        EnableWindow((HWND)handle, TRUE);
+
+    return true;
+}
+
+bool cbDisableWindow(int argc, char* argv[])
+{
+    if(IsArgumentsLessThan(argc, 2))
+        return false;
+    duint handle;
+    if(!valfromstring(argv[1], &handle, false))
+        return false;
+
+    if(IsWindowEnabled((HWND)handle))
+        EnableWindow((HWND)handle, FALSE);
+
     return true;
 }

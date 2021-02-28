@@ -7,7 +7,8 @@
 #include "thread.h"
 #include "memory.h"
 #include "threading.h"
-#include "undocumented.h"
+#include "ntdll/ntdll.h"
+#include "debugger.h"
 
 static std::unordered_map<DWORD, THREADINFO> threadList;
 static std::unordered_map<DWORD, THREADWAITREASON> threadWaitReasons;
@@ -172,7 +173,7 @@ bool ThreadIsValid(DWORD ThreadId)
 bool ThreadGetTib(duint TEBAddress, NT_TIB* Tib)
 {
     // Calculate offset from structure member
-    TEBAddress += offsetof(TEB, Tib);
+    TEBAddress += offsetof(TEB, NtTib);
 
     memset(Tib, 0, sizeof(NT_TIB));
     return MemReadUnsafe(TEBAddress, Tib, sizeof(NT_TIB));
@@ -186,17 +187,28 @@ bool ThreadGetTeb(duint TEBAddress, TEB* Teb)
 
 int ThreadGetSuspendCount(HANDLE Thread)
 {
+    // Query the suspend count. This only works on Windows 8.1 and later
+    DWORD suspendCount;
+    if(NT_SUCCESS(NtQueryInformationThread(Thread, ThreadSuspendCount, &suspendCount, sizeof(suspendCount), nullptr)))
+    {
+        return suspendCount;
+    }
+
     //
     // Suspend a thread in order to get the previous suspension count
     // WARNING: This function is very bad (threads should not be randomly interrupted)
     //
-    int suspendCount = (int)SuspendThread(Thread);
 
-    if(suspendCount == -1)
-        return 0;
+    // Use NtSuspendThread, because there is no Win32 error for STATUS_SUSPEND_COUNT_EXCEEDED
+    NTSTATUS status = NtSuspendThread(Thread, &suspendCount);
+    if(status == STATUS_SUSPEND_COUNT_EXCEEDED)
+        suspendCount = MAXCHAR; // If the thread is already at the max suspend count, KeSuspendThread raises an exception and never returns the count
+    else if(!NT_SUCCESS(status))
+        suspendCount = 0;
 
     // Resume the thread's normal execution
-    ResumeThread(Thread);
+    if(NT_SUCCESS(status))
+        ResumeThread(Thread);
 
     return suspendCount;
 }
@@ -224,6 +236,27 @@ DWORD ThreadGetLastError(DWORD ThreadId)
         return ThreadGetLastErrorTEB(threadList[ThreadId].ThreadLocalBase);
 
     ASSERT_ALWAYS("Trying to get last error of a thread that doesn't exist!");
+    return 0;
+}
+
+NTSTATUS ThreadGetLastStatusTEB(ULONG_PTR ThreadLocalBase)
+{
+    // Get the offset for the TEB::LastStatusValue and read it
+    NTSTATUS lastStatus = 0;
+    duint structOffset = ThreadLocalBase + offsetof(TEB, LastStatusValue);
+
+    MemReadUnsafe(structOffset, &lastStatus, sizeof(NTSTATUS));
+    return lastStatus;
+}
+
+NTSTATUS ThreadGetLastStatus(DWORD ThreadId)
+{
+    SHARED_ACQUIRE(LockThreads);
+
+    if(threadList.find(ThreadId) != threadList.end())
+        return ThreadGetLastStatusTEB(threadList[ThreadId].ThreadLocalBase);
+
+    ASSERT_ALWAYS("Trying to get last status of a thread that doesn't exist!");
     return 0;
 }
 
@@ -346,15 +379,6 @@ ULONG64 ThreadQueryCycleTime(HANDLE hThread)
 
 void ThreadUpdateWaitReasons()
 {
-    typedef NTSTATUS(NTAPI * NTQUERYSYSTEMINFORMATION)(
-        /*SYSTEM_INFORMATION_CLASS*/ ULONG SystemInformationClass,
-        PVOID SystemInformation,
-        ULONG SystemInformationLength,
-        PULONG ReturnLength);
-    static auto NtQuerySystemInformation = (NTQUERYSYSTEMINFORMATION)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation");
-    if(NtQuerySystemInformation == NULL)
-        return;
-
     ULONG size;
     if(NtQuerySystemInformation(SystemProcessInformation, NULL, 0, &size) != STATUS_INFO_LENGTH_MISMATCH)
         return;

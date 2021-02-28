@@ -2,6 +2,7 @@
 
 #include "_global.h"
 #include "_plugins.h"
+#include <functional>
 
 class FormatFunctions
 {
@@ -19,7 +20,7 @@ private:
     {
         String type;
         CBFORMATFUNCTION cbFunction;
-        void* userdata;
+        void* userdata = nullptr;
         std::vector<String> aliases;
     };
 

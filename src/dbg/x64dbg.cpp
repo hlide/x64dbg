@@ -16,7 +16,7 @@
 #include "watch.h"
 #include "plugin_loader.h"
 #include "_dbgfunctions.h"
-#include <capstone_wrapper.h>
+#include <zydis_wrapper.h>
 #include "_scriptapi_gui.h"
 #include "filehelper.h"
 #include "database.h"
@@ -25,7 +25,8 @@
 #include "exception.h"
 #include "expressionfunctions.h"
 #include "formatfunctions.h"
-#include "yara/yara.h"
+#include "stringformat.h"
+#include "dbghelp_safe.h"
 
 static MESSAGE_STACK* gMsgStack = 0;
 static HANDLE hCommandLoopThread = 0;
@@ -220,6 +221,8 @@ static void registercommands()
     dbgcmdnew("TraceSetCommand,SetTraceCommand", cbDebugTraceSetCommand, true); //Set trace command text + condition
     dbgcmdnew("TraceSetSwitchCondition,SetTraceSwitchCondition", cbDebugTraceSetSwitchCondition, true); //Set trace switch condition
     dbgcmdnew("TraceSetLogFile,SetTraceLogFile", cbDebugTraceSetLogFile, true); //Set trace log file
+    dbgcmdnew("StartRunTrace,opentrace", cbDebugStartRunTrace, true); //start run trace (Ollyscript command "opentrace" "opens run trace window")
+    dbgcmdnew("StopRunTrace,tc", cbDebugStopRunTrace, true); //stop run trace (and Ollyscript command)
 
     //thread control
     dbgcmdnew("createthread,threadcreate,newthread,threadnew", cbDebugCreatethread, true); //create thread
@@ -236,6 +239,7 @@ static void registercommands()
     dbgcmdnew("alloc", cbDebugAlloc, true); //allocate memory
     dbgcmdnew("free", cbDebugFree, true); //free memory
     dbgcmdnew("Fill,memset", cbDebugMemset, true); //memset
+    dbgcmdnew("memcpy", cbDebugMemcpy, true); //memcpy
     dbgcmdnew("getpagerights,getrightspage", cbDebugGetPageRights, true);
     dbgcmdnew("setpagerights,setrightspage", cbDebugSetPageRights, true);
     dbgcmdnew("savedata", cbInstrSavedata, true); //save data to disk
@@ -245,6 +249,8 @@ static void registercommands()
     dbgcmdnew("EnablePrivilege", cbEnablePrivilege, true); //enable priv
     dbgcmdnew("DisablePrivilege", cbDisablePrivilege, true); //disable priv
     dbgcmdnew("handleclose,closehandle", cbHandleClose, true); //close remote handle
+    dbgcmdnew("EnableWindow", cbEnableWindow, true); //enable remote window
+    dbgcmdnew("DisableWindow", cbDisableWindow, true); //disable remote window
 
     //watch control
     dbgcmdnew("AddWatch", cbAddWatch, true); // add watch
@@ -252,7 +258,9 @@ static void registercommands()
     dbgcmdnew("SetWatchdog", cbSetWatchdog, true); // Setup watchdog
     dbgcmdnew("SetWatchExpression", cbSetWatchExpression, true); // Set watch expression
     dbgcmdnew("SetWatchName", cbSetWatchName, true); // Set watch name
+    dbgcmdnew("SetWatchType", cbSetWatchType, true); // Set watch type
     dbgcmdnew("CheckWatchdog", cbCheckWatchdog, true); // Watchdog
+
 
     //variables
     dbgcmdnew("varnew,var", cbInstrVar, false); //make a variable arg1:name,[arg2:value]
@@ -267,9 +275,8 @@ static void registercommands()
     dbgcmdnew("reffind,findref,ref", cbInstrRefFind, true); //find references to a value
     dbgcmdnew("reffindrange,findrefrange,refrange", cbInstrRefFindRange, true);
     dbgcmdnew("refstr,strref", cbInstrRefStr, true); //find string references
+    dbgcmdnew("reffunctionpointer", cbInstrRefFuncionPointer, true); //find function pointers
     dbgcmdnew("modcallfind", cbInstrModCallFind, true); //find intermodular calls
-    dbgcmdnew("yara", cbInstrYara, true); //yara test command
-    dbgcmdnew("yaramod", cbInstrYaramod, true); //yara rule on module
     dbgcmdnew("setmaxfindresult,findsetmaxresult", cbInstrSetMaxFindResult, false); //set the maximum number of occurences found
     dbgcmdnew("guidfind,findguid", cbInstrGUIDFind, true); //find GUID references TODO: undocumented
 
@@ -320,6 +327,8 @@ static void registercommands()
 
     dbgcmdnew("virtualmod", cbInstrVirtualmod, true); //virtual module
     dbgcmdnew("symdownload,downloadsym", cbDebugDownloadSymbol, true); //download symbols
+    dbgcmdnew("symload,loadsym", cbDebugLoadSymbol, true); //load symbols
+    dbgcmdnew("symunload,unloadsym", cbDebugUnloadSymbol, true); //unload symbols
     dbgcmdnew("imageinfo,modimageinfo", cbInstrImageinfo, true); //print module image information
     dbgcmdnew("GetRelocSize,grs", cbInstrGetRelocSize, true); //get relocation table size
     dbgcmdnew("exhandlers", cbInstrExhandlers, true); //enumerate exception handlers
@@ -366,6 +375,7 @@ static void registercommands()
     dbgcmdnew("StartScylla,scylla,imprec", cbDebugStartScylla, false); //start scylla
     dbgcmdnew("plugload,pluginload,loadplugin", cbInstrPluginLoad, false); //load plugin
     dbgcmdnew("plugunload,pluginunload,unloadplugin", cbInstrPluginUnload, false); //unload plugin
+    dbgcmdnew("plugreload,pluginreload,reloadplugin", cbInstrPluginReload, false); //reload plugin
 
     //script
     dbgcmdnew("scriptload", cbScriptLoad, false);
@@ -373,6 +383,7 @@ static void registercommands()
     dbgcmdnew("msgyn", cbScriptMsgyn, false);
     dbgcmdnew("log", cbInstrLog, false); //log command with superawesome hax
     dbgcmdnew("scriptdll,dllscript", cbScriptDll, false); //execute a script DLL
+    dbgcmdnew("scriptcmd", cbScriptCmd, false); // execute a script command TODO: undocumented
 
     //gui
     dbgcmdnew("disasm,dis,d", cbDebugDisasm, true); //doDisasm
@@ -393,6 +404,8 @@ static void registercommands()
     dbgcmdnew("AddFavouriteCommand", cbInstrAddFavCmd, false); //add favourite command
     dbgcmdnew("AddFavouriteToolShortcut,SetFavouriteToolShortcut", cbInstrSetFavToolShortcut, false); //set favourite tool shortcut
     dbgcmdnew("FoldDisassembly", cbInstrFoldDisassembly, true); //fold disassembly segment
+    dbgcmdnew("guiupdatetitle", cbDebugUpdateTitle, true); // set relevant disassembly title
+    dbgcmdnew("showref", cbShowReferences, false); // show references window
 
     //misc
     dbgcmdnew("chd", cbInstrChd, false); //Change directory
@@ -424,7 +437,7 @@ static void registercommands()
     dbgcmdnew("setstr,strset", cbInstrSetstr, false); //set a string variable
     dbgcmdnew("getstr,strget", cbInstrGetstr, false); //get a string variable
     dbgcmdnew("copystr,strcpy", cbInstrCopystr, true); //write a string variable to memory
-    dbgcmdnew("capstone", cbInstrCapstone, true); //disassemble using capstone
+    dbgcmdnew("zydis", cbInstrZydis, true); //disassemble using zydis
     dbgcmdnew("visualize", cbInstrVisualize, true); //visualize analysis
     dbgcmdnew("meminfo", cbInstrMeminfo, true); //command to debug memory map bugs
     dbgcmdnew("briefcheck", cbInstrBriefcheck, true); //check if mnemonic briefs are missing
@@ -432,6 +445,9 @@ static void registercommands()
     dbgcmdnew("printstack,logstack", cbInstrPrintStack, true); //print the call stack
     dbgcmdnew("flushlog", cbInstrFlushlog, false); //flush the log
     dbgcmdnew("AnimateWait", cbInstrAnimateWait, true); //Wait for the debuggee to pause.
+    dbgcmdnew("dbdecompress", cbInstrDbdecompress, false); //Decompress a database.
+    dbgcmdnew("DebugFlags", cbInstrDebugFlags, false); //Set ntdll LdrpDebugFlags
+    dbgcmdnew("LabelRuntimeFunctions", cbInstrLabelRuntimeFunctions, true); //Label exception directory entries
 };
 
 bool cbCommandProvider(char* cmd, int maxlen)
@@ -497,7 +513,10 @@ static DWORD WINAPI DbgScriptDllExecThread(void* a)
     if(FreeLibrary(hScriptDll))
         dputs(QT_TRANSLATE_NOOP("DBG", "success!\n"));
     else
-        dprintf(QT_TRANSLATE_NOOP("DBG", "failure (%08X)...\n"), GetLastError());
+    {
+        String error = stringformatinline(StringUtils::sprintf("{winerror@%d}", GetLastError()));
+        dprintf(QT_TRANSLATE_NOOP("DBG", "failure (%s)...\n"), error.c_str());
+    }
 
     return 0;
 }
@@ -531,34 +550,46 @@ static bool DbgScriptDllExec(const char* dll)
                 dputs(QT_TRANSLATE_NOOP("DBG", "[Script DLL] \"Start\" returned!\n"));
             }
             else
-                dprintf(QT_TRANSLATE_NOOP("DBG", "[Script DLL] Failed to find the exports \"AsyncStart\" or \"Start\" (%s)!\n"), ErrorCodeToName(GetLastError()).c_str());
+            {
+                String error = stringformatinline(StringUtils::sprintf("{winerror@%d}", GetLastError()));
+                dprintf(QT_TRANSLATE_NOOP("DBG", "[Script DLL] Failed to find the exports \"AsyncStart\" or \"Start\" (%s)!\n"), error.c_str());
+            }
 
             dprintf(QT_TRANSLATE_NOOP("DBG", "[Script DLL] Calling FreeLibrary..."));
             if(FreeLibrary(hScriptDll))
                 dputs(QT_TRANSLATE_NOOP("DBG", "success!\n"));
             else
-                dprintf(QT_TRANSLATE_NOOP("DBG", "failure (%s)...\n"), ErrorCodeToName(GetLastError()).c_str());
+            {
+                String error = stringformatinline(StringUtils::sprintf("{winerror@%d}", GetLastError()));
+                dprintf(QT_TRANSLATE_NOOP("DBG", "failure (%s)...\n"), error.c_str());
+            }
         }
     }
     else
-        dprintf(QT_TRANSLATE_NOOP("DBG", "[Script DLL] LoadLibary failed (%s)!\n"), ErrorCodeToName(GetLastError()).c_str());
+    {
+        String error = stringformatinline(StringUtils::sprintf("{winerror@%d}", GetLastError()));
+        dprintf(QT_TRANSLATE_NOOP("DBG", "[Script DLL] LoadLibary failed (%s)!\n"), error.c_str());
+    }
 
     return true;
 }
 
-static DWORD WINAPI loadDbThread(LPVOID)
+static DWORD WINAPI loadDbThread(LPVOID hEvent)
 {
-    // Load mnemonic help database
-    String mnemonicHelpData;
-    if(FileHelper::ReadAllText(StringUtils::sprintf("%s\\..\\mnemdb.json", szProgramDir), mnemonicHelpData))
     {
-        if(MnemonicHelp::loadFromText(mnemonicHelpData.c_str()))
-            dputs(QT_TRANSLATE_NOOP("DBG", "Mnemonic help database loaded!"));
+        // Take exclusive ownership over the modules to prevent a race condition with cbCreateProcess
+        EXCLUSIVE_ACQUIRE(LockModules);
+
+        // Signal the startup thread that we have the lock
+        SetEvent(hEvent);
+
+        // Load syscall indices
+        dputs(QT_TRANSLATE_NOOP("DBG", "Retrieving syscall indices..."));
+        if(SyscallInit())
+            dputs(QT_TRANSLATE_NOOP("DBG", "Syscall indices loaded!"));
         else
-            dputs(QT_TRANSLATE_NOOP("DBG", "Failed to load mnemonic help database..."));
+            dputs(QT_TRANSLATE_NOOP("DBG", "Failed to load syscall indices..."));
     }
-    else
-        dputs(QT_TRANSLATE_NOOP("DBG", "Failed to read mnemonic help database..."));
 
     // Load error codes
     if(ErrorCodeInit(StringUtils::sprintf("%s\\..\\errordb.txt", szProgramDir)))
@@ -578,6 +609,12 @@ static DWORD WINAPI loadDbThread(LPVOID)
     else
         dputs(QT_TRANSLATE_NOOP("DBG", "Failed to load NTSTATUS codes..."));
 
+    // Load Windows constants
+    if(ConstantCodeInit(StringUtils::sprintf("%s\\..\\winconstants.txt", szProgramDir)))
+        dputs(QT_TRANSLATE_NOOP("DBG", "Windows constant database loaded!"));
+    else
+        dputs(QT_TRANSLATE_NOOP("DBG", "Failed to load Windows constants..."));
+
     // Load global notes
     dputs(QT_TRANSLATE_NOOP("DBG", "Reading notes file..."));
     notesFile = String(szProgramDir) + "\\notes.txt";
@@ -592,21 +629,71 @@ static DWORD WINAPI loadDbThread(LPVOID)
     return 0;
 }
 
+static WString escape(WString cmdline)
+{
+    StringUtils::ReplaceAll(cmdline, L"\\", L"\\\\");
+    StringUtils::ReplaceAll(cmdline, L"\"", L"\\\"");
+    return cmdline;
+}
+
+#include <delayimp.h>
+
+// https://devblogs.microsoft.com/oldnewthing/20170126-00/?p=95265
+static FARPROC WINAPI delayHook(unsigned dliNotify, PDelayLoadInfo pdli)
+{
+    if(dliNotify == dliNotePreLoadLibrary && _stricmp(pdli->szDll, "TitanEngine.dll") == 0)
+    {
+        String fullPath = szProgramDir;
+        fullPath += '\\';
+
+        switch(DbgGetDebugEngine())
+        {
+        case DebugEngineGleeBug:
+            fullPath += "GleeBug\\TitanEngine.dll";
+            break;
+        case DebugEngineStaticEngine:
+            fullPath += "StaticEngine\\TitanEngine.dll";
+            break;
+        case DebugEngineTitanEngine:
+        default:
+            return 0;
+        }
+
+        auto hModule = LoadLibraryW(StringUtils::Utf8ToUtf16(fullPath).c_str());
+        if(hModule)
+        {
+            dprintf(QT_TRANSLATE_NOOP("DBG", "Successfully loaded %s!\n"), fullPath.c_str());
+        }
+        else
+        {
+            dprintf(QT_TRANSLATE_NOOP("DBG", "Failed to load %s, falling back to regular TitanEngine.dll"), fullPath.c_str());
+        }
+        return (FARPROC)hModule;
+    }
+
+    return 0;
+}
+
+// Visual Studio 2015 Update 3 made this const per default
+// https://dev.to/yumetodo/list-of-mscver-and-mscfullver-8nd
+#if _MSC_FULL_VER >= 190024210
+const
+#endif // _MSC_FULL_VER
+PfnDliHook __pfnDliNotifyHook2 = delayHook;
+
 extern "C" DLL_EXPORT const char* _dbg_dbginit()
 {
+    if(!*szProgramDir)
+        return "GetModuleFileNameW failed!";
+
     if(!EngineCheckStructAlignment(UE_STRUCT_TITAN_ENGINE_CONTEXT, sizeof(TITAN_ENGINE_CONTEXT_t)))
         return "Invalid TITAN_ENGINE_CONTEXT_t alignment!";
 
     static_assert(sizeof(TITAN_ENGINE_CONTEXT_t) == sizeof(REGISTERCONTEXT), "Invalid REGISTERCONTEXT alignment!");
 
-    wchar_t wszDir[deflen] = L"";
-    if(!GetModuleFileNameW(hInst, wszDir, deflen))
-        return "GetModuleFileNameW failed!";
-    strcpy_s(szProgramDir, StringUtils::Utf16ToUtf8(wszDir).c_str());
-    int len = (int)strlen(szProgramDir);
-    while(szProgramDir[len] != '\\')
-        len--;
-    szProgramDir[len] = 0;
+    strcpy_s(szDllLoaderPath, szProgramDir);
+    strcat_s(szDllLoaderPath, "\\loaddll.exe");
+
 #ifdef ENABLE_MEM_TRACE
     strcpy_s(alloctrace, szProgramDir);
     strcat_s(alloctrace, "\\alloctrace.txt");
@@ -625,11 +712,8 @@ extern "C" DLL_EXPORT const char* _dbg_dbginit()
     dputs(QT_TRANSLATE_NOOP("DBG", "Setting JSON memory management functions..."));
     json_set_alloc_funcs(json_malloc, json_free);
     //#endif //ENABLE_MEM_TRACE
-    dputs(QT_TRANSLATE_NOOP("DBG", "Initializing capstone..."));
-    Capstone::GlobalInitialize();
-    dputs(QT_TRANSLATE_NOOP("DBG", "Initializing Yara..."));
-    if(yr_initialize() != ERROR_SUCCESS)
-        return "Failed to initialize Yara!";
+    dputs(QT_TRANSLATE_NOOP("DBG", "Initializing Zydis..."));
+    Zydis::GlobalInitialize();
     dputs(QT_TRANSLATE_NOOP("DBG", "Getting directory information..."));
 
     strcpy_s(scriptDllDir, szProgramDir);
@@ -637,7 +721,13 @@ extern "C" DLL_EXPORT const char* _dbg_dbginit()
     initDataInstMap();
 
     dputs(QT_TRANSLATE_NOOP("DBG", "Start file read thread..."));
-    CloseHandle(CreateThread(nullptr, 0, loadDbThread, nullptr, 0, nullptr));
+    {
+        auto hEvent = CreateEventW(nullptr, false, FALSE, nullptr);
+        CloseHandle(CreateThread(nullptr, 0, loadDbThread, hEvent, 0, nullptr));
+        // Wait until the loadDbThread signals it's finished
+        WaitForSingleObject(hEvent, INFINITE);
+        CloseHandle(hEvent);
+    }
 
     // Create database directory in the local debugger folder
     DbSetPath(StringUtils::sprintf("%s\\db", szProgramDir).c_str(), nullptr);
@@ -712,24 +802,30 @@ extern "C" DLL_EXPORT const char* _dbg_dbginit()
     strcat_s(plugindir, "\\plugins");
     CreateDirectoryW(StringUtils::Utf8ToUtf16(plugindir).c_str(), nullptr);
     CreateDirectoryW(StringUtils::Utf8ToUtf16(StringUtils::sprintf("%s\\memdumps", szProgramDir)).c_str(), nullptr);
+    dputs(QT_TRANSLATE_NOOP("DBG", "Initialization successful!"));
+    bIsStopped = false;
     dputs(QT_TRANSLATE_NOOP("DBG", "Loading plugins..."));
     pluginloadall(plugindir);
     dputs(QT_TRANSLATE_NOOP("DBG", "Handling command line..."));
+    dprintf("  %s\n", StringUtils::Utf16ToUtf8(GetCommandLineW()).c_str());
     //handle command line
     int argc = 0;
     wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    //MessageBoxW(0, GetCommandLineW(), StringUtils::sprintf(L"%d", argc).c_str(), MB_SYSTEMMODAL);
     if(argc == 2) //1 argument (init filename)
-        DbgCmdExec(StringUtils::Utf16ToUtf8(StringUtils::sprintf(L"init \"%s\"", argv[1])).c_str());
+        DbgCmdExec(StringUtils::Utf16ToUtf8(StringUtils::sprintf(L"init \"%s\"", escape(argv[1]).c_str())).c_str());
+    else if(argc == 3 && !_wcsicmp(argv[1], L"-p")) //2 arguments (-p PID)
+        DbgCmdExec(StringUtils::Utf16ToUtf8(StringUtils::sprintf(L"attach .%s", argv[2])).c_str()); //attach pid
     else if(argc == 3) //2 arguments (init filename, cmdline)
-        DbgCmdExec(StringUtils::Utf16ToUtf8(StringUtils::sprintf(L"init \"%s\", \"%s\"", argv[1], argv[2])).c_str());
+        DbgCmdExec(StringUtils::Utf16ToUtf8(StringUtils::sprintf(L"init \"%s\", \"%s\"", escape(argv[1]).c_str(), escape(argv[2]).c_str())).c_str());
     else if(argc == 4) //3 arguments (init filename, cmdline, currentdir)
-        DbgCmdExec(StringUtils::Utf16ToUtf8(StringUtils::sprintf(L"init \"%s\", \"%s\", \"%s\"", argv[1], argv[2], argv[3])).c_str());
-    else if(argc == 5 && !_wcsicmp(argv[1], L"-a") && !_wcsicmp(argv[3], L"-e")) //4 arguments (JIT)
+        DbgCmdExec(StringUtils::Utf16ToUtf8(StringUtils::sprintf(L"init \"%s\", \"%s\", \"%s\"", escape(argv[1]).c_str(), escape(argv[2]).c_str(), escape(argv[3]).c_str())).c_str());
+    else if(argc == 5 && (!_wcsicmp(argv[1], L"-a") || !_wcsicmp(argv[1], L"-p")) && !_wcsicmp(argv[3], L"-e")) //4 arguments (JIT)
         DbgCmdExec(StringUtils::Utf16ToUtf8(StringUtils::sprintf(L"attach .%s, .%s", argv[2], argv[4])).c_str()); //attach pid, event
+    else if(argc == 5 && !_wcsicmp(argv[1], L"-p") && !_wcsicmp(argv[3], L"-tid")) //4 arguments (PLMDebug)
+        DbgCmdExec(StringUtils::Utf16ToUtf8(StringUtils::sprintf(L"attach .%s, 0, .%s", argv[2], argv[4])).c_str()); //attach pid, 0, tid
     LocalFree(argv);
 
-    dputs(QT_TRANSLATE_NOOP("DBG", "Initialization successful!"));
-    bIsStopped = false;
     return nullptr;
 }
 
@@ -738,26 +834,20 @@ extern "C" DLL_EXPORT const char* _dbg_dbginit()
 */
 extern "C" DLL_EXPORT void _dbg_dbgexitsignal()
 {
+    dputs(QT_TRANSLATE_NOOP("DBG", "Stopping command thread..."));
+    bStopCommandLoopThread = true;
+    MsgFreeStack(gMsgStack);
+    WaitForThreadTermination(hCommandLoopThread);
     dputs(QT_TRANSLATE_NOOP("DBG", "Stopping running debuggee..."));
-    cbDebugStop(0, 0);
-    dputs(QT_TRANSLATE_NOOP("DBG", "Waiting for the debuggee to be stopped..."));
-    if(!waitfor(WAITID_STOP, 10000)) //after this, debugging stopped
-    {
-        dputs(QT_TRANSLATE_NOOP("DBG", "The debuggee does not close after 10 seconds. Probably the debugger state has been corrupted."));
-    }
+    cbDebugStop(0, 0); //after this, debugging stopped
     dputs(QT_TRANSLATE_NOOP("DBG", "Aborting scripts..."));
     scriptabort();
     dputs(QT_TRANSLATE_NOOP("DBG", "Unloading plugins..."));
     pluginunloadall();
-    dputs(QT_TRANSLATE_NOOP("DBG", "Stopping command thread..."));
-    bStopCommandLoopThread = true;
-    MsgFreeStack(gMsgStack);
-    WaitForThreadTermination(hCommandLoopThread, 10000);
     dputs(QT_TRANSLATE_NOOP("DBG", "Cleaning up allocated data..."));
     cmdfree();
     varfree();
-    yr_finalize();
-    Capstone::GlobalFinalize();
+    Zydis::GlobalFinalize();
     dputs(QT_TRANSLATE_NOOP("DBG", "Cleaning up wait objects..."));
     waitdeinitialize();
     SafeDbghelpDeinitialize();

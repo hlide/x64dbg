@@ -6,6 +6,7 @@
 #include "memory.h"
 #include "variable.h"
 #include "filehelper.h"
+#include "label.h"
 
 using namespace Types;
 
@@ -449,12 +450,26 @@ struct PrintVisitor : TypeManager::Visitor
 
     bool visitType(const Member & member, const Type & type) override
     {
+        if(!mParents.empty() && parent().type == Parent::Union)
+            mOffset = parent().offset;
+
         String tname;
         auto ptype = mParents.empty() ? Parent::Struct : parent().type;
         if(ptype == Parent::Array)
             tname = StringUtils::sprintf("%s[%u]", member.name.c_str(), parent().index++);
         else
             tname = StringUtils::sprintf("%s %s", type.name.c_str(), member.name.c_str());
+
+        std::string path;
+        for(size_t i = 0; i < mPath.size(); i++)
+        {
+            if(ptype == Parent::Array && i + 1 == mPath.size())
+                break;
+            path.append(mPath[i]);
+        }
+        path.append(member.name);
+        if(!LabelGet(mAddr + mOffset, nullptr) && (parent().index == 1 || ptype != Parent::Array))
+            LabelSet(mAddr + mOffset, path.c_str(), false, true);
 
         TYPEDESCRIPTOR td;
         td.expanded = false;
@@ -467,14 +482,16 @@ struct PrintVisitor : TypeManager::Visitor
         td.callback = cbPrintPrimitive;
         td.userdata = nullptr;
         mNode = GuiTypeAddNode(mParents.empty() ? nullptr : parent().node, &td);
+        mOffset += type.size;
 
-        if(ptype != Parent::Union)
-            mOffset += type.size;
         return true;
     }
 
     bool visitStructUnion(const Member & member, const StructUnion & type) override
     {
+        if(!mParents.empty() && parent().type == Parent::Type::Union)
+            mOffset = parent().offset;
+
         String tname = StringUtils::sprintf("%s %s %s", type.isunion ? "union" : "struct", type.name.c_str(), member.name.c_str());
 
         TYPEDESCRIPTOR td;
@@ -489,8 +506,11 @@ struct PrintVisitor : TypeManager::Visitor
         td.userdata = nullptr;
         auto node = GuiTypeAddNode(mParents.empty() ? nullptr : parent().node, &td);
 
+        mPath.push_back((member.name == "visit" ? type.name : member.name) + ".");
         mParents.push_back(Parent(type.isunion ? Parent::Union : Parent::Struct));
         parent().node = node;
+        parent().size = td.size;
+        parent().offset = mOffset;
         return true;
     }
 
@@ -510,8 +530,10 @@ struct PrintVisitor : TypeManager::Visitor
         td.userdata = nullptr;
         auto node = GuiTypeAddNode(mParents.empty() ? nullptr : parent().node, &td);
 
+        mPath.push_back(member.name + ".");
         mParents.push_back(Parent(Parent::Array));
         parent().node = node;
+        parent().size = td.size;
         return true;
     }
 
@@ -526,10 +548,12 @@ struct PrintVisitor : TypeManager::Visitor
         if(!mAddr || !MemRead(mAddr + offset, &value, sizeof(value)))
             return false;
 
+        mPath.push_back(member.name + "->");
         mParents.push_back(Parent(Parent::Pointer));
         parent().offset = mOffset;
         parent().addr = mAddr;
         parent().node = mNode;
+        parent().size = type.size;
         mOffset = 0;
         mAddr = value;
         mPtrDepth++;
@@ -544,7 +568,12 @@ struct PrintVisitor : TypeManager::Visitor
             mAddr = parent().addr;
             mPtrDepth--;
         }
+        else if(parent().type == Parent::Union)
+        {
+            mOffset = parent().offset + parent().size;
+        }
         mParents.pop_back();
+        mPath.pop_back();
         return true;
     }
 
@@ -564,6 +593,7 @@ private:
         duint addr = 0;
         duint offset = 0;
         void* node = nullptr;
+        int size = 0;
 
         explicit Parent(Type type)
             : type(type) { }
@@ -580,6 +610,7 @@ private:
     int mPtrDepth = 0;
     int mMaxPtrDepth = 0;
     void* mNode = nullptr;
+    std::vector<String> mPath;
 };
 
 bool cbInstrVisitType(int argc, char* argv[])

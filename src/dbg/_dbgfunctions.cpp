@@ -28,6 +28,9 @@
 #include "animate.h"
 #include "thread.h"
 #include "comment.h"
+#include "exception.h"
+#include "database.h"
+#include "dbghelp_safe.h"
 
 static DBGFUNCTIONS _dbgfunctions;
 
@@ -100,7 +103,14 @@ static bool _patchrestore(duint addr)
 
 static void _getcallstack(DBGCALLSTACK* callstack)
 {
-    stackgetcallstack(GetContextDataEx(hActiveThread, UE_CSP), (CALLSTACK*)callstack);
+    if(hActiveThread)
+        stackgetcallstack(GetContextDataEx(hActiveThread, UE_CSP), (CALLSTACK*)callstack);
+}
+
+static void _getcallstackbythread(HANDLE thread, DBGCALLSTACK* callstack)
+{
+    if(thread)
+        stackgetcallstackbythread(thread, (CALLSTACK*)callstack);
 }
 
 static void _getsehchain(DBGSEHCHAIN* sehchain)
@@ -134,7 +144,7 @@ static bool _getcmdline(char* cmd_line, size_t* cbsize)
     if(!cmd_line && cbsize)
         *cbsize = strlen(cmdline) + sizeof(char);
     else if(cmd_line)
-        strcpy(cmd_line, cmdline);
+        memcpy(cmd_line, cmdline, strlen(cmdline) + 1);
     efree(cmdline, "_getcmdline:cmdline");
     return true;
 }
@@ -168,7 +178,8 @@ bool _getprocesslist(DBGPROCESSINFO** entries, int* count)
 {
     std::vector<PROCESSENTRY32> infoList;
     std::vector<std::string> commandList;
-    if(!dbglistprocesses(&infoList, &commandList))
+    std::vector<std::string> winTextList;
+    if(!dbglistprocesses(&infoList, &commandList, &winTextList))
         return false;
     *count = (int)infoList.size();
     if(!*count)
@@ -178,6 +189,7 @@ bool _getprocesslist(DBGPROCESSINFO** entries, int* count)
     {
         (*entries)[*count - i - 1].dwProcessId = infoList.at(i).th32ProcessID;
         strncpy_s((*entries)[*count - i - 1].szExeFile, infoList.at(i).szExeFile, _TRUNCATE);
+        strncpy_s((*entries)[*count - i - 1].szExeMainWindowTitle, winTextList.at(i).c_str(), _TRUNCATE);
         strncpy_s((*entries)[*count - i - 1].szExeArgs, commandList.at(i).c_str(), _TRUNCATE);
     }
     return true;
@@ -191,15 +203,17 @@ static void _memupdatemap()
 
 static duint _getaddrfromline(const char* szSourceFile, int line, duint* disp)
 {
-    LONG displacement = 0;
-    IMAGEHLP_LINE64 lineData;
-    memset(&lineData, 0, sizeof(lineData));
-    lineData.SizeOfStruct = sizeof(lineData);
-    if(!SymGetLineFromName64(fdProcessInfo->hProcess, NULL, szSourceFile, line, &displacement, &lineData))
-        return 0;
     if(disp)
-        *disp = displacement;
-    return (duint)lineData.Address;
+        *disp = 0;
+    return 0;
+}
+
+static duint _getaddrfromlineex(duint mod, const char* szSourceFile, int line)
+{
+    duint addr = 0;
+    if(SymGetSourceAddr(mod, szSourceFile, line, &addr))
+        return addr;
+    return 0;
 }
 
 static bool _getsourcefromaddr(duint addr, char* szSourceFile, int* line)
@@ -273,7 +287,7 @@ static void _getmnemonicbrief(const char* mnem, size_t resultSize, char* result)
 static bool _enumhandles(ListOf(HANDLEINFO) handles)
 {
     std::vector<HANDLEINFO> handleV;
-    if(!HandlesEnum(fdProcessInfo->dwProcessId, handleV))
+    if(!HandlesEnum(handleV))
         return false;
     return BridgeList<HANDLEINFO>::CopyData(handles, handleV);
 }
@@ -282,10 +296,10 @@ static bool _gethandlename(duint handle, char* name, size_t nameSize, char* type
 {
     String nameS;
     String typeNameS;
-    if(!HandlesGetName(fdProcessInfo->hProcess, HANDLE(handle), nameS, typeNameS))
+    if(!HandlesGetName(HANDLE(handle), nameS, typeNameS))
         return false;
-    strcpy_s(name, nameSize, nameS.c_str());
-    strcpy_s(typeName, typeNameSize, typeNameS.c_str());
+    strncpy_s(name, nameSize, nameS.c_str(), _TRUNCATE);
+    strncpy_s(typeName, typeNameSize, typeNameS.c_str(), _TRUNCATE);
     return true;
 }
 
@@ -321,6 +335,134 @@ static void _getcallstackex(DBGCALLSTACK* callstack, bool cache)
     stackgetcallstack(csp, (CALLSTACK*)callstack);
 }
 
+static void _enumconstants(ListOf(CONSTANTINFO) constants)
+{
+    auto constantsV = ConstantList();
+    BridgeList<CONSTANTINFO>::CopyData(constants, constantsV);
+}
+
+static void _enumerrorcodes(ListOf(CONSTANTINFO) errorcodes)
+{
+    auto errorcodesV = ErrorCodeList();
+    BridgeList<CONSTANTINFO>::CopyData(errorcodes, errorcodesV);
+}
+
+static void _enumexceptions(ListOf(CONSTANTINFO) exceptions)
+{
+    auto exceptionsV = ExceptionList();
+    BridgeList<CONSTANTINFO>::CopyData(exceptions, exceptionsV);
+}
+
+static duint _membpsize(duint addr)
+{
+    SHARED_ACQUIRE(LockBreakpoints);
+    auto info = BpInfoFromAddr(BPMEMORY, addr);
+    return info ? info->memsize : 0;
+}
+
+static bool _modrelocationsfromaddr(duint addr, ListOf(DBGRELOCATIONINFO) relocations)
+{
+    std::vector<MODRELOCATIONINFO> infos;
+    if(!ModRelocationsFromAddr(addr, infos))
+        return false;
+
+    BridgeList<MODRELOCATIONINFO>::CopyData(relocations, infos);
+    return true;
+}
+
+static bool _modrelocationsinrange(duint addr, duint size, ListOf(DBGRELOCATIONINFO) relocations)
+{
+    std::vector<MODRELOCATIONINFO> infos;
+    if(!ModRelocationsInRange(addr, size, infos))
+        return false;
+
+    BridgeList<MODRELOCATIONINFO>::CopyData(relocations, infos);
+    return true;
+}
+
+static int SymAutoComplete(const char* Search, char** Buffer, int MaxSymbols)
+{
+    //TODO: refactor this in a function because this pattern will become common
+    std::vector<duint> mods;
+    ModEnum([&mods](const MODINFO & info)
+    {
+        mods.push_back(info.base);
+    });
+
+    std::unordered_set<std::string> visited;
+
+    static const bool caseSensitiveAutoComplete = settingboolget("Gui", "CaseSensitiveAutoComplete");
+
+    int count = 0;
+    std::string prefix(Search);
+    for(duint base : mods)
+    {
+        if(count == MaxSymbols)
+            break;
+
+        SHARED_ACQUIRE(LockModules);
+        auto modInfo = ModInfoFromAddr(base);
+        if(!modInfo)
+            continue;
+
+        auto addName = [Buffer, MaxSymbols, &visited, &count](const std::string & name)
+        {
+            if(visited.count(name))
+                return true;
+            visited.insert(name);
+            Buffer[count] = (char*)BridgeAlloc(name.size() + 1);
+            memcpy(Buffer[count], name.c_str(), name.size() + 1);
+            return ++count < MaxSymbols;
+        };
+
+        NameIndex::findByPrefix(modInfo->exportsByName, prefix, [modInfo, &addName](const NameIndex & index)
+        {
+            return addName(modInfo->exports[index.index].name);
+        }, caseSensitiveAutoComplete);
+
+        if(count == MaxSymbols)
+            break;
+
+        if(modInfo->symbols->isOpen())
+        {
+            modInfo->symbols->findSymbolsByPrefix(prefix, [&addName](const SymbolInfo & symInfo)
+            {
+                return addName(symInfo.decoratedName);
+            }, caseSensitiveAutoComplete);
+        }
+    }
+
+    std::stable_sort(Buffer, Buffer + count, [](const char* a, const char* b)
+    {
+        return (caseSensitiveAutoComplete ? strcmp : StringUtils::hackicmp)(a, b) < 0;
+    });
+
+    return count;
+}
+
+MODULESYMBOLSTATUS _modsymbolstatus(duint base)
+{
+    SHARED_ACQUIRE(LockModules);
+    auto modInfo = ModInfoFromAddr(base);
+    if(!modInfo)
+        return MODSYMUNLOADED;
+    bool isOpen = modInfo->symbols->isOpen();
+    bool isLoading = modInfo->symbols->isLoading();
+    if(isOpen && !isLoading)
+        return MODSYMLOADED;
+    else if(isOpen && isLoading)
+        return MODSYMLOADING;
+    else if(!isOpen && symbolDownloadingBase == base)
+        return MODSYMLOADING;
+    else
+        return MODSYMUNLOADED;
+}
+
+static void _refreshmodulelist()
+{
+    SymUpdateModuleList();
+}
+
 void dbgfunctionsinit()
 {
     _dbgfunctions.AssembleAtEx = _assembleatex;
@@ -354,7 +496,7 @@ void dbgfunctionsinit()
     _dbgfunctions.GetPageRights = MemGetPageRights;
     _dbgfunctions.SetPageRights = MemSetPageRights;
     _dbgfunctions.PageRightsToString = MemPageRightsToString;
-    _dbgfunctions.IsProcessElevated = IsProcessElevated;
+    _dbgfunctions.IsProcessElevated = BridgeIsProcessElevated;
     _dbgfunctions.GetCmdline = _getcmdline;
     _dbgfunctions.SetCmdline = _setcmdline;
     _dbgfunctions.FileOffsetToVa = valfileoffsettova;
@@ -384,4 +526,17 @@ void dbgfunctionsinit()
     _dbgfunctions.IsDepEnabled = dbgisdepenabled;
     _dbgfunctions.GetCallStackEx = _getcallstackex;
     _dbgfunctions.GetUserComment = CommentGet;
+    _dbgfunctions.EnumConstants = _enumconstants;
+    _dbgfunctions.EnumErrorCodes = _enumerrorcodes;
+    _dbgfunctions.EnumExceptions = _enumexceptions;
+    _dbgfunctions.MemBpSize = _membpsize;
+    _dbgfunctions.ModRelocationsFromAddr = _modrelocationsfromaddr;
+    _dbgfunctions.ModRelocationAtAddr = (MODRELOCATIONATADDR)ModRelocationAtAddr;
+    _dbgfunctions.ModRelocationsInRange = _modrelocationsinrange;
+    _dbgfunctions.DbGetHash = DbGetHash;
+    _dbgfunctions.SymAutoComplete = SymAutoComplete;
+    _dbgfunctions.RefreshModuleList = _refreshmodulelist;
+    _dbgfunctions.GetAddrFromLineEx = _getaddrfromlineex;
+    _dbgfunctions.ModSymbolStatus = _modsymbolstatus;
+    _dbgfunctions.GetCallStackByThread = _getcallstackbythread;
 }

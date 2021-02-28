@@ -6,6 +6,8 @@
 #include "console.h"
 #include "cmd-debug-control.h"
 #include "value.h"
+#include "variable.h"
+#include "TraceRecord.h"
 
 extern std::vector<std::pair<duint, duint>> RunToUserCodeBreakpoints;
 
@@ -31,7 +33,7 @@ static bool cbDebugConditionalTrace(void(*callback)(), bool stepOver, int argc, 
     HistoryClear();
 
     if(stepOver)
-        StepOver((void*)callback);
+        StepOverWrapper((void*)callback);
     else
         StepIntoWow64((void*)callback);
     return cbDebugRunInternal(1, argv);
@@ -95,15 +97,15 @@ bool cbDebugRunToParty(int argc, char* argv[])
 {
     HistoryClear();
     EXCLUSIVE_ACQUIRE(LockRunToUserCode);
-    std::vector<MODINFO> AllModules;
-    ModGetList(AllModules);
     if(!RunToUserCodeBreakpoints.empty())
     {
         dputs(QT_TRANSLATE_NOOP("DBG", "Run to party is busy.\n"));
         return false;
     }
+    if(IsArgumentsLessThan(argc, 2))
+        return false;
     int party = atoi(argv[1]); // party is a signed integer
-    for(auto i : AllModules)
+    ModEnum([party](const MODINFO & i)
     {
         if(i.party == party)
         {
@@ -112,19 +114,20 @@ bool cbDebugRunToParty(int argc, char* argv[])
                 BREAKPOINT bp;
                 if(!BpGet(j.addr, BPMEMORY, nullptr, &bp))
                 {
-                    RunToUserCodeBreakpoints.push_back(std::make_pair(j.addr, j.size));
-                    SetMemoryBPXEx(j.addr, j.size, UE_MEMORY_EXECUTE, false, (void*)cbRunToUserCodeBreakpoint);
+                    size_t size = DbgMemGetPageSize(j.addr);
+                    RunToUserCodeBreakpoints.push_back(std::make_pair(j.addr, size));
+                    SetMemoryBPXEx(j.addr, size, UE_MEMORY_EXECUTE, false, (void*)cbRunToUserCodeBreakpoint);
                 }
             }
         }
-    }
+    });
     return cbDebugRunInternal(1, argv);
 }
 
 bool cbDebugRunToUserCode(int argc, char* argv[])
 {
     char* newargv[] = { "RunToParty", "0" };
-    return cbDebugRunToParty(argc, newargv);
+    return cbDebugRunToParty(2, newargv);
 }
 
 bool cbDebugTraceSetLog(int argc, char* argv[])
@@ -166,4 +169,16 @@ bool cbDebugTraceSetLogFile(int argc, char* argv[])
 {
     auto fileName = argc > 1 ? argv[1] : "";
     return dbgsettracelogfile(fileName);
+}
+
+bool cbDebugStartRunTrace(int argc, char* argv[])
+{
+    if(IsArgumentsLessThan(argc, 2))
+        return false;
+    return _dbg_dbgenableRunTrace(true, argv[1]);
+}
+
+bool cbDebugStopRunTrace(int argc, char* argv[])
+{
+    return _dbg_dbgenableRunTrace(false, nullptr);
 }

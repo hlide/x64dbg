@@ -1,23 +1,27 @@
 #include "CPUInfoBox.h"
 #include "Configuration.h"
+#include "WordEditDialog.h"
+#include "XrefBrowseDialog.h"
 #include "Bridge.h"
+#include "QBeaEngine.h"
 
-CPUInfoBox::CPUInfoBox(StdTable* parent) : StdTable(parent)
+CPUInfoBox::CPUInfoBox(QWidget* parent) : StdTable(parent)
 {
     setWindowTitle("InfoBox");
     enableMultiSelection(false);
     setShowHeader(false);
     addColumnAt(0, "", true);
-    setRowCount(3);
+    setRowCount(4);
     setCellContent(0, 0, "");
     setCellContent(1, 0, "");
     setCellContent(2, 0, "");
+    setCellContent(3, 0, "");
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    horizontalScrollBar()->setStyleSheet(ConfigHScrollBarStyle());
 
     int height = getHeight();
     setMinimumHeight(height);
+
     connect(Bridge::getBridge(), SIGNAL(dbgStateChanged(DBGSTATE)), this, SLOT(dbgStateChanged(DBGSTATE)));
     connect(Bridge::getBridge(), SIGNAL(addInfoLine(QString)), this, SLOT(addInfoLine(QString)));
     connect(this, SIGNAL(contextMenuSignal(QPoint)), this, SLOT(contextMenuSlot(QPoint)));
@@ -27,7 +31,15 @@ CPUInfoBox::CPUInfoBox(StdTable* parent) : StdTable(parent)
     // Deselect any row (visual reasons only)
     setSingleSelection(-1);
 
+    int maxModuleSize = (int)ConfigUint("Disassembler", "MaxModuleSize");
+    mDisasm = new QBeaEngine(maxModuleSize);
+
     setupContextMenu();
+}
+
+CPUInfoBox::~CPUInfoBox()
+{
+    delete mDisasm;
 }
 
 void CPUInfoBox::setupContextMenu()
@@ -35,16 +47,18 @@ void CPUInfoBox::setupContextMenu()
     mCopyAddressAction = makeAction(tr("Address"), SLOT(copyAddress()));
     mCopyRvaAction = makeAction(tr("RVA"), SLOT(copyRva()));
     mCopyOffsetAction = makeAction(tr("File Offset"), SLOT(copyOffset()));
+    mCopyLineAction = makeAction(tr("Copy Line"), SLOT(copyLineSlot()));
+    setupShortcuts();
 }
 
 int CPUInfoBox::getHeight()
 {
-    return ((getRowHeight() + 1) * 3);
+    return ((getRowHeight() + 1) * 4);
 }
 
 void CPUInfoBox::setInfoLine(int line, QString text)
 {
-    if(line < 0 || line > 2)
+    if(line < 0 || line > 3)
         return;
 
     setCellContent(line, 0, text);
@@ -53,8 +67,8 @@ void CPUInfoBox::setInfoLine(int line, QString text)
 
 QString CPUInfoBox::getInfoLine(int line)
 {
-    if(line < 0 || line > 2)
-        return "";
+    if(line < 0 || line > 3)
+        return QString();
 
     return getCellContent(line, 0);
 }
@@ -69,71 +83,69 @@ void CPUInfoBox::addInfoLine(const QString & infoLine)
 
 void CPUInfoBox::clear()
 {
-    // Set all 3 lines to empty strings
-    setRowCount(3);
+    // Set all 4 lines to empty strings
+    setRowCount(4);
     setInfoLine(0, "");
     setInfoLine(1, "");
     setInfoLine(2, "");
+    setInfoLine(3, "");
 }
 
-static QString escapeCh(QChar ch)
+static QString formatSSEOperand(const QByteArray & data, uint8_t vectorType)
 {
-    switch(ch.unicode())
+    QString hex;
+    bool isXMMdecoded = false;
+    switch(vectorType)
     {
-    case '\t':
-        return "\\t";
-    case '\f':
-        return "\\f";
-    case '\v':
-        return "\\v";
-    case '\n':
-        return "\\n";
-    case '\r':
-        return "\\r";
-    case '\\':
-        return "\\\\";
-    case '\"':
-        return "\\\"";
+    case Zydis::VETFloat32:
+        if(data.size() == 32)
+        {
+            hex = composeRegTextYMM(data.constData(), 1);
+            isXMMdecoded = true;
+        }
+        else if(data.size() == 16)
+        {
+            hex = composeRegTextXMM(data.constData(), 1);
+            isXMMdecoded = true;
+        }
+        else if(data.size() == 4)
+        {
+            hex = QString::number(((const float*)data.constData())[0]);
+            isXMMdecoded = true;
+        }
+        break;
+    case Zydis::VETFloat64:
+        if(data.size() == 32)
+        {
+            hex = composeRegTextYMM(data.constData(), 2);
+            isXMMdecoded = true;
+        }
+        else if(data.size() == 16)
+        {
+            hex = composeRegTextXMM(data.constData(), 2);
+            isXMMdecoded = true;
+        }
+        else if(data.size() == 8)
+        {
+            hex = QString::number(((const double*)data.constData())[0]);
+            isXMMdecoded = true;
+        }
+        break;
     default:
-        return QString(1, ch);
+        isXMMdecoded = false;
+        break;
     }
-}
-
-QString CPUInfoBox::getSymbolicName(dsint addr)
-{
-    char labelText[MAX_LABEL_SIZE] = "";
-    char moduleText[MAX_MODULE_SIZE] = "";
-    char string[MAX_STRING_SIZE] = "";
-    bool bHasString = DbgGetStringAt(addr, string);
-    bool bHasLabel = DbgGetLabelAt(addr, SEG_DEFAULT, labelText);
-    bool bHasModule = (DbgGetModuleAt(addr, moduleText) && !QString(labelText).startsWith("JMP.&"));
-    QString addrText = DbgMemIsValidReadPtr(addr) ? ToPtrString(addr) : ToHexString(addr);
-    QString finalText;
-    if(bHasString)
-        finalText = addrText + " " + QString(string);
-    else if(bHasLabel && bHasModule) //<module.label>
-        finalText = QString("<%1.%2>").arg(moduleText).arg(labelText);
-    else if(bHasModule) //module.addr
-        finalText = QString("%1.%2").arg(moduleText).arg(addrText);
-    else if(bHasLabel) //<label>
-        finalText = QString("<%1>").arg(labelText);
-    else
+    if(!isXMMdecoded)
     {
-        finalText = addrText;
-        if(addr == (addr & 0xFF))
+        hex.reserve(data.size() * 3);
+        for(int k = 0; k < data.size(); k++)
         {
-            QChar c = QChar((char)addr);
-            if(c.isPrint() || c.isSpace())
-                finalText += QString(" '%1'").arg(escapeCh(c));
-        }
-        else if(addr == (addr & 0xFFF)) //UNICODE?
-        {
-            QChar c = QChar((ushort)addr);
-            if(c.isPrint() || c.isSpace())
-                finalText += QString(" L'%1'").arg(escapeCh(c));
+            if(k)
+                hex.append(' ');
+            hex.append(ToByteString(data[k]));
         }
     }
-    return finalText;
+    return hex;
 }
 
 void CPUInfoBox::disasmSelectionChanged(dsint parVA)
@@ -145,20 +157,24 @@ void CPUInfoBox::disasmSelectionChanged(dsint parVA)
     if(!DbgIsDebugging() || !DbgMemIsValidReadPtr(parVA))
         return;
 
-    // Rather than using clear() or setInfoLine(), only reset the first two cells to reduce flicker
-    setRowCount(3);
+    // Rather than using clear() or setInfoLine(), only reset the first three cells to reduce flicker
+    setRowCount(4);
     setCellContent(0, 0, "");
     setCellContent(1, 0, "");
+    setCellContent(2, 0, "");
 
-    DISASM_INSTR instr;
-    memset(&instr, 0, sizeof(instr));
+    Instruction_t wInst;
+    unsigned char instructiondata[MAX_DISASM_BUFFER];
+    DbgMemRead(parVA, &instructiondata, MAX_DISASM_BUFFER);
+    wInst = mDisasm->DisassembleAt(instructiondata, MAX_DISASM_BUFFER, 0, parVA);
+    DISASM_INSTR instr; //Fix me: these disasm methods are so messy
     DbgDisasmAt(parVA, &instr);
     BASIC_INSTRUCTION_INFO basicinfo;
-    memset(&basicinfo, 0, sizeof(basicinfo));
     DbgDisasmFastAt(parVA, &basicinfo);
 
     int start = 0;
-    if(basicinfo.branch && !basicinfo.call && (!ConfigBool("Disassembler", "OnlyCipAutoComments") || parVA == DbgValFromString("cip"))) //jump
+    bool commentThis = !ConfigBool("Disassembler", "OnlyCipAutoComments") || parVA == DbgValFromString("cip");
+    if(wInst.branchType == Instruction_t::Conditional && commentThis) //jump
     {
         bool taken = DbgIsJumpGoingToExecute(parVA);
         if(taken)
@@ -172,7 +188,7 @@ void CPUInfoBox::disasmSelectionChanged(dsint parVA)
 
     for(int i = 0, j = start; i < instr.argcount && j < 2; i++)
     {
-        DISASM_ARG arg = instr.arg[i];
+        const DISASM_ARG & arg = instr.arg[i];
         QString argMnemonic = QString(arg.mnemonic);
         if(bUpper)
             argMnemonic = argMnemonic.toUpper();
@@ -181,48 +197,101 @@ void CPUInfoBox::disasmSelectionChanged(dsint parVA)
             bool ok;
             argMnemonic.toULongLong(&ok, 16);
             QString valText = DbgMemIsValidReadPtr(arg.value) ? ToPtrString(arg.value) : ToHexString(arg.value);
+            auto valTextSym = getSymbolicNameStr(arg.value);
+            if(!valTextSym.contains(valText))
+                valText = QString("%1 %2").arg(valText, valTextSym);
+            else
+                valText = valTextSym;
             argMnemonic = !ok ? QString("%1]=[%2").arg(argMnemonic).arg(valText) : valText;
             QString sizeName = "";
-            int memsize = basicinfo.memory.size;
-            switch(memsize)
+            bool knownsize = true;
+            switch(basicinfo.memory.size)
             {
             case size_byte:
-                sizeName = "byte ptr";
+                sizeName = "byte ptr ";
                 break;
             case size_word:
-                sizeName = "word ptr";
+                sizeName = "word ptr ";
                 break;
             case size_dword:
-                sizeName = "dword ptr";
+                sizeName = "dword ptr ";
                 break;
+#ifdef _WIN64
             case size_qword:
-                sizeName = "qword ptr";
+                sizeName = "qword ptr ";
+                break;
+#endif //_WIN64
+            case size_xmmword:
+                knownsize = false;
+                sizeName = "xmmword ptr ";
+                break;
+            case size_ymmword:
+                knownsize = false;
+                sizeName = "ymmword ptr ";
+                break;
+            default:
+                knownsize = false;
                 break;
             }
 
-#ifdef _WIN64
-            if(arg.segment == SEG_GS)
-                sizeName += "gs:";
-#else //x32
-            if(arg.segment == SEG_FS)
-                sizeName += "fs:";
-#endif
+            sizeName += [](SEGMENTREG seg)
+            {
+                switch(seg)
+                {
+                case SEG_ES:
+                    return "es:";
+                case SEG_DS:
+                    return "ds:";
+                case SEG_FS:
+                    return "fs:";
+                case SEG_GS:
+                    return "gs:";
+                case SEG_CS:
+                    return "cs:";
+                case SEG_SS:
+                    return "ss:";
+                default:
+                    return "";
+                }
+            }(arg.segment);
 
             if(bUpper)
                 sizeName = sizeName.toUpper();
 
             if(!DbgMemIsValidReadPtr(arg.value))
-                setInfoLine(j, sizeName + "[" + argMnemonic + "]=???");
-            else
             {
-                QString addrText = getSymbolicName(arg.memvalue);
+                setInfoLine(j, sizeName + "[" + argMnemonic + "]=???");
+            }
+            else if(knownsize && wInst.vectorElementType[i] == Zydis::VETDefault) // MOVSD/MOVSS instruction
+            {
+                QString addrText = getSymbolicNameStr(arg.memvalue);
                 setInfoLine(j, sizeName + "[" + argMnemonic + "]=" + addrText);
             }
+            else
+            {
+                QByteArray data;
+                data.resize(basicinfo.memory.size);
+                memset(data.data(), 0, data.size());
+                if(DbgMemRead(arg.value, data.data(), data.size()))
+                {
+                    setInfoLine(j, sizeName + "[" + argMnemonic + "]=" + formatSSEOperand(data, wInst.vectorElementType[i]));
+                }
+                else
+                {
+                    setInfoLine(j, sizeName + "[" + argMnemonic + "]=???");
+                }
+            }
+
             j++;
         }
         else
         {
-            auto symbolicName = getSymbolicName(arg.value);
+            QString valText;
+            auto symbolicName = getSymbolicNameStr(arg.value);
+            if(!symbolicName.contains(valText))
+                valText = QString("%1 (%2)").arg(symbolicName, valText);
+            else
+                valText = symbolicName;
             QString mnemonic(arg.mnemonic);
             bool ok;
             mnemonic.toULongLong(&ok, 16);
@@ -232,17 +301,179 @@ void CPUInfoBox::disasmSelectionChanged(dsint parVA)
                     continue;
                 setInfoLine(j, symbolicName);
             }
-            else if(!mnemonic.startsWith("xmm") && //TODO: properly handle display of these registers
+            else if(!mnemonic.startsWith("xmm") &&
                     !mnemonic.startsWith("ymm") &&
+                    !mnemonic.startsWith("zmm") && //TODO: properly handle display of AVX-512 registers
+                    !mnemonic.startsWith("k") && //TODO: properly handle display of AVX-512 registers
                     !mnemonic.startsWith("st"))
             {
-                setInfoLine(j, mnemonic + "=" + symbolicName);
+                setInfoLine(j, mnemonic + "=" + valText);
+                j++;
+            }
+            else if(mnemonic.startsWith("xmm") || mnemonic.startsWith("ymm") || mnemonic.startsWith("st"))
+            {
+                REGDUMP registers;
+                DbgGetRegDumpEx(&registers, sizeof(registers));
+                if(mnemonic == "xmm0")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.XmmRegisters[0], 16), wInst.vectorElementType[i]);
+                else if(mnemonic == "xmm1")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.XmmRegisters[1], 16), wInst.vectorElementType[i]);
+                else if(mnemonic == "xmm2")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.XmmRegisters[2], 16), wInst.vectorElementType[i]);
+                else if(mnemonic == "xmm3")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.XmmRegisters[3], 16), wInst.vectorElementType[i]);
+                else if(mnemonic == "xmm4")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.XmmRegisters[4], 16), wInst.vectorElementType[i]);
+                else if(mnemonic == "xmm5")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.XmmRegisters[5], 16), wInst.vectorElementType[i]);
+                else if(mnemonic == "xmm6")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.XmmRegisters[6], 16), wInst.vectorElementType[i]);
+                else if(mnemonic == "xmm7")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.XmmRegisters[7], 16), wInst.vectorElementType[i]);
+#ifdef _WIN64
+                else if(mnemonic == "xmm8")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.XmmRegisters[8], 16), wInst.vectorElementType[i]);
+                else if(mnemonic == "xmm9")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.XmmRegisters[9], 16), wInst.vectorElementType[i]);
+                else if(mnemonic == "xmm10")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.XmmRegisters[10], 16), wInst.vectorElementType[i]);
+                else if(mnemonic == "xmm11")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.XmmRegisters[11], 16), wInst.vectorElementType[i]);
+                else if(mnemonic == "xmm12")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.XmmRegisters[12], 16), wInst.vectorElementType[i]);
+                else if(mnemonic == "xmm13")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.XmmRegisters[13], 16), wInst.vectorElementType[i]);
+                else if(mnemonic == "xmm14")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.XmmRegisters[14], 16), wInst.vectorElementType[i]);
+                else if(mnemonic == "xmm15")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.XmmRegisters[15], 16), wInst.vectorElementType[i]);
+#endif //_WIN64
+                else if(mnemonic == "ymm0")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.YmmRegisters[0], 32), wInst.vectorElementType[i]);
+                else if(mnemonic == "ymm1")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.YmmRegisters[1], 32), wInst.vectorElementType[i]);
+                else if(mnemonic == "ymm2")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.YmmRegisters[2], 32), wInst.vectorElementType[i]);
+                else if(mnemonic == "ymm3")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.YmmRegisters[3], 32), wInst.vectorElementType[i]);
+                else if(mnemonic == "ymm4")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.YmmRegisters[4], 32), wInst.vectorElementType[i]);
+                else if(mnemonic == "ymm5")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.YmmRegisters[5], 32), wInst.vectorElementType[i]);
+                else if(mnemonic == "ymm6")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.YmmRegisters[6], 32), wInst.vectorElementType[i]);
+                else if(mnemonic == "ymm7")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.YmmRegisters[7], 32), wInst.vectorElementType[i]);
+#ifdef _WIN64
+                else if(mnemonic == "ymm8")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.YmmRegisters[8], 32), wInst.vectorElementType[i]);
+                else if(mnemonic == "ymm9")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.YmmRegisters[9], 32), wInst.vectorElementType[i]);
+                else if(mnemonic == "ymm10")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.YmmRegisters[10], 32), wInst.vectorElementType[i]);
+                else if(mnemonic == "ymm11")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.YmmRegisters[11], 32), wInst.vectorElementType[i]);
+                else if(mnemonic == "ymm12")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.YmmRegisters[12], 32), wInst.vectorElementType[i]);
+                else if(mnemonic == "ymm13")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.YmmRegisters[13], 32), wInst.vectorElementType[i]);
+                else if(mnemonic == "ymm14")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.YmmRegisters[14], 32), wInst.vectorElementType[i]);
+                else if(mnemonic == "ymm15")
+                    valText = formatSSEOperand(QByteArray((const char*)&registers.regcontext.YmmRegisters[15], 32), wInst.vectorElementType[i]);
+#endif //_WIN64
+                else if(mnemonic == "st0")
+                    valText = ToLongDoubleString(&registers.x87FPURegisters[registers.x87StatusWordFields.TOP & 7]);
+                else if(mnemonic == "st1")
+                    valText = ToLongDoubleString(&registers.x87FPURegisters[(registers.x87StatusWordFields.TOP + 1) & 7]);
+                else if(mnemonic == "st2")
+                    valText = ToLongDoubleString(&registers.x87FPURegisters[(registers.x87StatusWordFields.TOP + 2) & 7]);
+                else if(mnemonic == "st3")
+                    valText = ToLongDoubleString(&registers.x87FPURegisters[(registers.x87StatusWordFields.TOP + 3) & 7]);
+                else if(mnemonic == "st4")
+                    valText = ToLongDoubleString(&registers.x87FPURegisters[(registers.x87StatusWordFields.TOP + 4) & 7]);
+                else if(mnemonic == "st5")
+                    valText = ToLongDoubleString(&registers.x87FPURegisters[(registers.x87StatusWordFields.TOP + 5) & 7]);
+                else if(mnemonic == "st6")
+                    valText = ToLongDoubleString(&registers.x87FPURegisters[(registers.x87StatusWordFields.TOP + 6) & 7]);
+                else if(mnemonic == "st7")
+                    valText = ToLongDoubleString(&registers.x87FPURegisters[(registers.x87StatusWordFields.TOP + 7) & 7]);
+                setInfoLine(j, mnemonic + "=" + valText);
                 j++;
             }
         }
     }
     if(getInfoLine(0) == getInfoLine(1)) //check for duplicate info line
         setInfoLine(1, "");
+
+    // check references details
+    // code extracted from ExtraInfo plugin by torusrxxx
+    XREF_INFO xrefInfo;
+    xrefInfo.refcount = 0;
+    xrefInfo.references = nullptr;
+
+    if(DbgXrefGet(parVA, &xrefInfo) && xrefInfo.refcount > 0)
+    {
+        QString output;
+        std::vector<XREF_RECORD*> data;
+        for(duint i = 0; i < xrefInfo.refcount; i++)
+            data.push_back(&xrefInfo.references[i]);
+
+        std::sort(data.begin(), data.end(), [](const XREF_RECORD * A, const XREF_RECORD * B)
+        {
+            if(A->type != B->type)
+                return (A->type < B->type);
+
+            return (A->addr < B->addr);
+        });
+
+        int t = XREF_NONE;
+        duint i;
+
+        for(i = 0; i < xrefInfo.refcount && i < 10; i++)
+        {
+            if(t != data[i]->type)
+            {
+                switch(data[i]->type)
+                {
+                case XREF_JMP:
+                    output += tr("Jump from ");
+                    break;
+                case XREF_CALL:
+                    output += tr("Call from ");
+                    break;
+                default:
+                    output += tr("Reference from ");
+                    break;
+                }
+
+                t = data[i]->type;
+            }
+
+            char clabel[MAX_LABEL_SIZE] = "";
+
+            DbgGetLabelAt(data[i]->addr, SEG_DEFAULT, clabel);
+            if(*clabel)
+                output += QString(clabel);
+            else
+            {
+                duint start;
+                if(DbgFunctionGet(data[i]->addr, &start, nullptr) && DbgGetLabelAt(start, SEG_DEFAULT, clabel) && start != data[i]->addr)
+                    output += QString("%1+%2").arg(clabel).arg(ToHexString(data[i]->addr - start));
+                else
+                    output += QString("%1").arg(ToHexString(data[i]->addr));
+            }
+
+            if(i != xrefInfo.refcount - 1)
+                output += ", ";
+        }
+
+        data.clear();
+        if(xrefInfo.refcount > 10)
+            output += "...";
+
+        setInfoLine(2, output);
+    }
 
     // Set last line
     //
@@ -293,7 +524,7 @@ void CPUInfoBox::disasmSelectionChanged(dsint parVA)
         info += ", " + tr("Accessed %n time(s)", nullptr, tracedCount);
     }
 
-    setInfoLine(2, info);
+    setInfoLine(3, info);
 
     DbgSelChanged(GUI_DISASSEMBLY, parVA);
 }
@@ -311,9 +542,92 @@ void CPUInfoBox::followActionSlot()
 {
     QAction* action = qobject_cast<QAction*>(sender());
     if(action && action->objectName().startsWith("DUMP|"))
-        DbgCmdExec(QString("dump \"%1\"").arg(action->objectName().mid(5)).toUtf8().constData());
+        DbgCmdExec(QString("dump \"%1\"").arg(action->objectName().mid(5)));
     else if(action && action->objectName().startsWith("WATCH|"))
-        DbgCmdExec(QString("AddWatch \"[%1]\"").arg(action->objectName().mid(6)).toUtf8().constData());
+        DbgCmdExec(QString("AddWatch \"[%1]\"").arg(action->objectName().mid(6)));
+}
+
+void CPUInfoBox::modifySlot()
+{
+    QAction* action = qobject_cast<QAction*>(sender());
+    if(action)
+    {
+        duint addrVal = 0;
+        DbgFunctions()->ValFromString(action->objectName().toUtf8().constData(), &addrVal);
+        WordEditDialog wEditDialog(this);
+        dsint value = 0;
+        DbgMemRead(addrVal, &value, sizeof(dsint));
+        wEditDialog.setup(tr("Modify Value"), value, sizeof(dsint));
+        if(wEditDialog.exec() != QDialog::Accepted)
+            return;
+        value = wEditDialog.getVal();
+        DbgMemWrite(addrVal, &value, sizeof(dsint));
+        GuiUpdateAllViews();
+    }
+}
+
+void CPUInfoBox::findXReferencesSlot()
+{
+    if(!DbgIsDebugging())
+        return;
+    if(!mXrefDlg)
+        mXrefDlg = new XrefBrowseDialog(this);
+    mXrefDlg->setup(curAddr, [](duint address)
+    {
+        DbgCmdExec(QString("disasm %1").arg(ToPtrString(address)));
+    });
+    mXrefDlg->showNormal();
+}
+
+void CPUInfoBox::addModifyValueMenuItem(QMenu* menu, QString name, duint value)
+{
+    foreach(QAction* action, menu->actions()) //check for duplicate action
+        if(action->text() == name)
+            return;
+    QAction* newAction = new QAction(name, menu);
+    menu->addAction(newAction);
+    newAction->setObjectName(ToPtrString(value));
+    connect(newAction, SIGNAL(triggered()), this, SLOT(modifySlot()));
+}
+
+void CPUInfoBox::setupModifyValueMenu(QMenu* menu, duint wVA)
+{
+    menu->setIcon(DIcon("modify.png"));
+
+    //add follow actions
+    DISASM_INSTR instr;
+    DbgDisasmAt(wVA, &instr);
+
+    for(int i = 0; i < instr.argcount; i++)
+    {
+        const DISASM_ARG arg = instr.arg[i];
+        if(arg.type == arg_memory)
+        {
+            QString segment = "";
+#ifdef _WIN64
+            if(arg.segment == SEG_GS)
+                segment = "gs:";
+#else //x32
+            if(arg.segment == SEG_FS)
+                segment = "fs:";
+#endif //_WIN64
+            if(DbgMemIsValidReadPtr(arg.value))
+                addModifyValueMenuItem(menu, tr("&Address: ") + segment + QString(arg.mnemonic).toUpper().trimmed(), arg.value);
+            if(arg.value != arg.constant)
+            {
+                QString constant = QString("%1").arg(ToHexString(arg.constant));
+                if(DbgMemIsValidReadPtr(arg.constant))
+                    addModifyValueMenuItem(menu, tr("&Constant: ") + constant, arg.constant);
+            }
+            if(DbgMemIsValidReadPtr(arg.memvalue))
+                addModifyValueMenuItem(menu, tr("&Value: ") + segment + "[" + QString(arg.mnemonic).toUpper().trimmed() + "]", arg.memvalue);
+        }
+        else
+        {
+            if(DbgMemIsValidReadPtr(arg.value))
+                addModifyValueMenuItem(menu, "&Value: [" + QString(arg.mnemonic).toUpper().trimmed() + "]", arg.value);
+        }
+    }
 }
 
 /**
@@ -328,7 +642,6 @@ void CPUInfoBox::addFollowMenuItem(QMenu* menu, QString name, duint value)
         if(action->text() == name)
             return;
     QAction* newAction = new QAction(name, menu);
-    newAction->setFont(QFont("Courier New", 8));
     menu->addAction(newAction);
     newAction->setObjectName(QString("DUMP|") + ToPtrString(value));
     connect(newAction, SIGNAL(triggered()), this, SLOT(followActionSlot()));
@@ -393,7 +706,6 @@ void CPUInfoBox::addWatchMenuItem(QMenu* menu, QString name, duint value)
         if(action->text() == name)
             return;
     QAction* newAction = new QAction(name, menu);
-    newAction->setFont(QFont("Courier New", 8));
     menu->addAction(newAction);
     newAction->setObjectName(QString("WATCH|") + ToPtrString(value));
     connect(newAction, SIGNAL(triggered()), this, SLOT(followActionSlot()));
@@ -459,7 +771,7 @@ int CPUInfoBox::followInDump(dsint wVA)
     // Last line of infoBox => Current Address(EIP) in disassembly
     if(tableOffset == 2)
     {
-        DbgCmdExec(QString("dump %1").arg(ToPtrString(wVA)).toUtf8().constData());
+        DbgCmdExec(QString("dump %1").arg(ToPtrString(wVA)));
         return 0;
     }
 
@@ -468,7 +780,7 @@ int CPUInfoBox::followInDump(dsint wVA)
 
     if(instr.type == instr_branch && cellContent.contains("Jump"))
     {
-        DbgCmdExec(QString("dump %1").arg(ToPtrString(instr.arg[0].value)).toUtf8().constData());
+        DbgCmdExec(QString("dump %1").arg(ToPtrString(instr.arg[0].value)));
         return 0;
     }
 
@@ -482,7 +794,7 @@ int CPUInfoBox::followInDump(dsint wVA)
             {
                 if(cellContent.contains(arg.mnemonic))
                 {
-                    DbgCmdExec(QString("dump %1").arg(ToPtrString(arg.value)).toUtf8().constData());
+                    DbgCmdExec(QString("dump %1").arg(ToPtrString(arg.value)));
                     return 0;
                 }
             }
@@ -497,9 +809,15 @@ void CPUInfoBox::contextMenuSlot(QPoint pos)
     QMenu wFollowMenu(tr("&Follow in Dump"), this);
     setupFollowMenu(&wFollowMenu, curAddr);
     wMenu.addMenu(&wFollowMenu);
+    QMenu wModifyValueMenu(tr("&Modify Value"), this);
+    setupModifyValueMenu(&wModifyValueMenu, curAddr);
+    if(!wModifyValueMenu.isEmpty())
+        wMenu.addMenu(&wModifyValueMenu);
     QMenu wWatchMenu(tr("&Watch"), this);
     setupWatchMenu(&wWatchMenu, curAddr);
     wMenu.addMenu(&wWatchMenu);
+    if(!getInfoLine(2).isEmpty())
+        wMenu.addAction(makeAction(DIcon("xrefs.png"), tr("&Show References"), SLOT(findXReferencesSlot())));
     QMenu wCopyMenu(tr("&Copy"), this);
     setupCopyMenu(&wCopyMenu);
     if(DbgIsDebugging())
@@ -536,4 +854,10 @@ void CPUInfoBox::copyOffset()
 void CPUInfoBox::doubleClickedSlot()
 {
     followInDump(curAddr);
+}
+
+void CPUInfoBox::setupShortcuts()
+{
+    mCopyLineAction->setShortcut(ConfigShortcut("ActionCopyLine"));
+    addAction(mCopyLineAction);
 }

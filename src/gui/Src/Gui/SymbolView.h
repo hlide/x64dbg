@@ -5,7 +5,9 @@
 #include "Bridge.h"
 
 class QMenu;
+class StdSearchListView;
 class SearchListView;
+class SymbolSearchList;
 class QVBoxLayout;
 
 namespace Ui
@@ -19,8 +21,12 @@ class SymbolView : public QWidget
 
 public:
     explicit SymbolView(QWidget* parent = 0);
-    ~SymbolView();
+    ~SymbolView() override;
     void setupContextMenu();
+    void saveWindowSettings();
+    void loadWindowSettings();
+
+    void invalidateSymbolSource(duint base);
 
 private slots:
     void updateStyle();
@@ -31,6 +37,7 @@ private slots:
     void symbolFollow();
     void symbolFollowDump();
     void symbolFollowImport();
+    void symbolSelectModule(duint base);
     void enterPressedSlot();
     void symbolContextMenu(QMenu* wMenu);
     void symbolRefreshCurrent();
@@ -41,8 +48,6 @@ private slots:
     void moduleDownloadAllSymbols();
     void moduleCopyPath();
     void moduleBrowse();
-    void moduleYara();
-    void moduleYaraFile();
     void moduleSetUser();
     void moduleSetSystem();
     void moduleSetParty();
@@ -50,7 +55,6 @@ private slots:
     void toggleBreakpoint();
     void toggleBookmark();
     void refreshShortcutsSlot();
-    void moduleEntropy();
     void emptySearchResultSlot();
     void selectionGetSlot(SELECTIONDATA* selection);
     void moduleLoad();
@@ -64,8 +68,9 @@ private:
     QVBoxLayout* mMainLayout;
     QVBoxLayout* mSymbolLayout;
     QWidget* mSymbolPlaceHolder;
-    SearchListView* mSearchListView;
-    SearchListView* mModuleList;
+    SearchListView* mSymbolList;
+    StdSearchListView* mModuleList;
+    SymbolSearchList* mSymbolSearchList;
     QMap<QString, duint> mModuleBaseList;
     QAction* mFollowSymbolAction;
     QAction* mFollowSymbolDumpAction;
@@ -77,9 +82,6 @@ private:
     QAction* mDownloadSymbolsAction;
     QAction* mDownloadAllSymbolsAction;
     QAction* mCopyPathAction;
-    QAction* mYaraAction;
-    QAction* mYaraFileAction;
-    QAction* mEntropyAction;
     QAction* mModSetUserAction;
     QAction* mModSetSystemAction;
     QAction* mModSetPartyAction;
@@ -87,6 +89,7 @@ private:
     QAction* mFollowInMemMap;
     QAction* mLoadLib;
     QAction* mFreeLib;
+    QMenu* mPluginMenu;
 
     static void cbSymbolEnum(SYMBOLINFO* symbol, void* user);
 };

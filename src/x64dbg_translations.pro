@@ -15,7 +15,6 @@ SOURCES += \
     gui/Src/Gui/CloseDialog.cpp \
     gui/Src/Gui/CodepageSelectionDialog.cpp \
     gui/Src/Gui/ColumnReorderDialog.cpp \
-    gui/Src/Gui/CommandHelpView.cpp \
     gui/Src/Gui/CommandLineEdit.cpp \
     gui/Src/Gui/CPUArgumentWidget.cpp \
     gui/Src/Gui/CPUDisassembly.cpp \
@@ -68,7 +67,7 @@ SOURCES += \
     gui/Src/Gui/XrefBrowseDialog.cpp \
     gui/Src/Gui/YaraRuleSelectionDialog.cpp \
     gui/Src/main.cpp \
-    gui/Src/Disassembler/capstone_gui.cpp \
+    gui/Src/Disassembler/ZydisTokenizer.cpp \
     gui/Src/Disassembler/QBeaEngine.cpp \
     dbg/_dbgfunctions.cpp \
     dbg/_exports.cpp \
@@ -169,12 +168,10 @@ SOURCES += \
     gui/Src/BasicView/HistoryLineEdit.cpp \
     gui/Src/BasicView/ReferenceView.cpp \
     gui/Src/BasicView/SearchListView.cpp \
-    gui/Src/BasicView/SearchListViewTable.cpp \
     gui/Src/BasicView/ShortcutEdit.cpp \
     gui/Src/BasicView/StdTable.cpp \
     gui/Src/Memory/MemoryPage.cpp \
     gui/Src/QEntropyView/QEntropyView.cpp \
-    gui/Src/ThirdPartyLibs/float128/float128.cpp \
     dbg/analysis/advancedanalysis.cpp \
     dbg/analysis/analysis.cpp \
     dbg/analysis/analysis_nukem.cpp \
@@ -213,11 +210,26 @@ SOURCES += \
     gui/Src/Utils/MenuBuilder.cpp \
     gui/Src/Gui/SimpleTraceDialog.cpp \
     gui/Src/Gui/StructWidget.cpp \
-    gui/Src/Gui/BreakpointsViewTable.cpp \
     dbg/formatfunctions.cpp \
     dbg/types.cpp \
     dbg/typesparser.cpp \
-    gui/Src/Utils/MRUList.cpp
+    gui/Src/Utils/MRUList.cpp \
+    gui/Src/Gui/LocalVarsView.cpp \
+    gui/Src/Gui/MessagesBreakpoints.cpp \
+    gui/Src/Gui/AboutDialog.cpp \
+    gui/Src/Utils/CommonActions.cpp \
+    gui/Src/Utils/SymbolAutoCompleteModel.cpp \
+    gui/Src/Tracer/TraceBrowser.cpp \
+    gui/Src/Tracer/TraceFileReader.cpp \
+    gui/Src/Tracer/TraceFileSearch.cpp \
+    gui/Src/Gui/MultiItemsSelectWindow.cpp \
+    gui/Src/BasicView/AbstractStdTable.cpp \
+    gui/Src/Gui/ZehSymbolTable.cpp \
+    gui/Src/BasicView/StdSearchListView.cpp \
+    gui/Src/Gui/CPURegistersView.cpp \
+    gui/Src/Tracer/TraceRegisters.cpp \
+    gui/Src/Tracer/TraceWidget.cpp \
+    gui/Src/Gui/SystemBreakpointScriptDialog.cpp
 
 HEADERS += \
     gui/Src/Exports.h \
@@ -233,7 +245,6 @@ HEADERS += \
     gui/Src/Gui/CloseDialog.h \
     gui/Src/Gui/CodepageSelectionDialog.h \
     gui/Src/Gui/ColumnReorderDialog.h \
-    gui/Src/Gui/CommandHelpView.h \
     gui/Src/Gui/CommandLineEdit.h \
     gui/Src/Gui/CPUArgumentWidget.h \
     gui/Src/Gui/CPUDisassembly.h \
@@ -286,7 +297,7 @@ HEADERS += \
     gui/Src/Gui/WordEditDialog.h \
     gui/Src/Gui/XrefBrowseDialog.h \
     gui/Src/Gui/YaraRuleSelectionDialog.h \
-    gui/Src/Disassembler/capstone_gui.h \
+    gui/Src/Disassembler/ZydisTokenizer.h \
     gui/Src/Disassembler/QBeaEngine.h \
     gui/Src/Gui/StructWidget.h \
     dbg/_dbgfunctions.h \
@@ -362,7 +373,7 @@ HEADERS += \
     dbg/thread.h \
     dbg/threading.h \
     dbg/TraceRecord.h \
-    dbg/undocumented.h \
+    dbg/ntdll/ntdll.h \
     dbg/value.h \
     dbg/variable.h \
     dbg/watch.h \
@@ -397,13 +408,11 @@ HEADERS += \
     gui/Src/BasicView/HistoryLineEdit.h \
     gui/Src/BasicView/ReferenceView.h \
     gui/Src/BasicView/SearchListView.h \
-    gui/Src/BasicView/SearchListViewTable.h \
     gui/Src/BasicView/ShortcutEdit.h \
     gui/Src/BasicView/StdTable.h \
     gui/Src/Memory/MemoryPage.h \
     gui/Src/QEntropyView/Entropy.h \
     gui/Src/QEntropyView/QEntropyView.h \
-    gui/Src/ThirdPartyLibs/float128/float128.h \
     gui/Src/ThirdPartyLibs/snowman/SnowmanView.h \
     dbg/analysis/advancedanalysis.h \
     dbg/analysis/analysis.h \
@@ -441,11 +450,27 @@ HEADERS += \
     dbg/commands/cmd-watch-control.h \
     gui/Src/Gui/CustomizeMenuDialog.h \
     gui/Src/Gui/SimpleTraceDialog.h \
-    gui/Src/Gui/BreakpointsViewTable.h \
     dbg/filemap.h \
     dbg/formatfunctions.h \
     dbg/types.h \
-    gui/Src/Utils/MRUList.h
+    gui/Src/Utils/MRUList.h \
+    gui/Src/Gui/LocalVarsView.h \
+    gui/Src/Gui/MessagesBreakpoints.h \
+    gui/Src/Gui/AboutDialog.h \
+    gui/Src/Utils/CommonActions.h \
+    gui/Src/Utils/SymbolAutoCompleteModel.h \
+    gui/Src/Tracer/TraceBrowser.h \
+    gui/Src/Tracer/TraceFileReader.h \
+    gui/Src/Tracer/TraceFileReaderInternal.h \
+    gui/Src/Tracer/TraceFileSearch.h \
+    gui/Src/Gui/MultiItemsSelectWindow.h \
+    gui/Src/BasicView/AbstractStdTable.h \
+    gui/Src/Gui/ZehSymbolTable.h \
+    gui/Src/BasicView/StdSearchListView.h \
+    gui/Src/Gui/CPURegistersView.h \
+    gui/Src/Tracer/TraceRegisters.h \
+    gui/Src/Tracer/TraceWidget.h \
+    gui/Src/Gui/SystemBreakpointScriptDialog.h
 
 FORMS += \
     gui/Src/Gui/AppearanceDialog.ui \
@@ -456,7 +481,6 @@ FORMS += \
     gui/Src/Gui/CloseDialog.ui \
     gui/Src/Gui/CodepageSelectionDialog.ui \
     gui/Src/Gui/ColumnReorderDialog.ui \
-    gui/Src/Gui/CommandHelpView.ui \
     gui/Src/Gui/CPUArgumentWidget.ui \
     gui/Src/Gui/CPUWidget.ui \
     gui/Src/Gui/DataCopyDialog.ui \
@@ -483,7 +507,11 @@ FORMS += \
     gui/Src/Gui/YaraRuleSelectionDialog.ui \
     gui/Src/Gui/CustomizeMenuDialog.ui \
     gui/Src/Gui/SimpleTraceDialog.ui \
-    gui/Src/Gui/StructWidget.ui
+    gui/Src/Gui/StructWidget.ui \
+    gui/Src/Gui/MessagesBreakpoints.ui \
+    gui/Src/Gui/AboutDialog.ui \
+    gui/Src/Tracer/TraceWidget.ui \
+    gui/Src/Gui/SystemBreakpointScriptDialog.ui
 
 TRANSLATIONS += \
     gui/Translations/x64dbg.ts

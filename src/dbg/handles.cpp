@@ -1,70 +1,9 @@
+#include <functional>
 #include "handles.h"
-#include "undocumented.h"
+#include "ntdll/ntdll.h"
 #include "exception.h"
 #include "debugger.h"
-
-typedef struct _OBJECT_NAME_INFORMATION
-{
-    UNICODE_STRING Name;
-} OBJECT_NAME_INFORMATION, *POBJECT_NAME_INFORMATION;
-
-typedef struct _OBJECT_TYPE_INFORMATION
-{
-    UNICODE_STRING TypeName;
-    ULONG TotalNumberOfObjects;
-    ULONG TotalNumberOfHandles;
-    ULONG TotalPagedPoolUsage;
-    ULONG TotalNonPagedPoolUsage;
-    ULONG TotalNamePoolUsage;
-    ULONG TotalHandleTableUsage;
-    ULONG HighWaterNumberOfObjects;
-    ULONG HighWaterNumberOfHandles;
-    ULONG HighWaterPagedPoolUsage;
-    ULONG HighWaterNonPagedPoolUsage;
-    ULONG HighWaterNamePoolUsage;
-    ULONG HighWaterHandleTableUsage;
-    ULONG InvalidAttributes;
-    GENERIC_MAPPING GenericMapping;
-    ULONG ValidAccessMask;
-    BOOLEAN SecurityRequired;
-    BOOLEAN MaintainHandleCount;
-    UCHAR TypeIndex; // since WINBLUE
-    CHAR ReservedByte;
-    ULONG PoolType;
-    ULONG DefaultPagedPoolCharge;
-    ULONG DefaultNonPagedPoolCharge;
-} OBJECT_TYPE_INFORMATION, *POBJECT_TYPE_INFORMATION;
-
-#define STATUS_INFO_LENGTH_MISMATCH 0xC0000004
-#define STATUS_SUCCESS 0x00000000
-
-#define SystemHandleInformation 16
-
-#define ObjectNameInformation 1
-#define ObjectTypeInformation 2
-
-typedef enum _SYSTEM_HANDLE_FLAGS
-{
-    PROTECT_FROM_CLOSE = 1,
-    INHERIT = 2
-} SYSTEM_HANDLE_FLAGS;
-
-typedef struct _SYSTEM_HANDLE_TABLE_ENTRY_INFO // Size=16
-{
-    USHORT UniqueProcessId; // Size=2 Offset=0
-    USHORT CreatorBackTraceIndex; // Size=2 Offset=2
-    UCHAR ObjectTypeIndex; // Size=1 Offset=4
-    UCHAR HandleAttributes; // Size=1 Offset=5 (SYSTEM_HANDLE_FLAGS)
-    USHORT HandleValue; // Size=2 Offset=6
-    PVOID Object; // Size=4 Offset=8
-    ULONG GrantedAccess; // Size=4 Offset=12
-} SYSTEM_HANDLE_TABLE_ENTRY_INFO, *PSYSTEM_HANDLE_TABLE_ENTRY_INFO;
-
-typedef struct _SYSTEM_HANDLE_INFORMATION // Size=20
-{
-    ULONG NumberOfHandles; // Size=4 Offset=0
-    SYSTEM_HANDLE_TABLE_ENTRY_INFO Handles[1]; // Size=16 Offset=4
-} SYSTEM_HANDLE_INFORMATION, *PSYSTEM_HANDLE_INFORMATION;
+#include "thread.h"
 
 typedef NTSTATUS(NTAPI* ZWQUERYSYSTEMINFORMATION)(
     IN LONG SystemInformationClass,
@@ -81,16 +20,16 @@ typedef NTSTATUS(NTAPI* ZWQUERYOBJECT)(
     OUT PULONG ReturnLength OPTIONAL
 );
 
-bool HandlesEnum(duint pid, std::vector<HANDLEINFO> & handles)
+// Enumerate all handles in the debuggee
+bool HandlesEnum(std::vector<HANDLEINFO> & handles)
 {
-    static auto ZwQuerySystemInformation = ZWQUERYSYSTEMINFORMATION(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "ZwQuerySystemInformation"));
-    if(!ZwQuerySystemInformation)
-        return 0;
+    duint pid;
     Memory<PSYSTEM_HANDLE_INFORMATION> HandleInformation(16 * 1024, "_dbg_enumhandles");
     NTSTATUS ErrorCode = ERROR_SUCCESS;
+    pid = fdProcessInfo->dwProcessId;
     for(;;)
     {
-        ErrorCode = ZwQuerySystemInformation(SystemHandleInformation, HandleInformation(), ULONG(HandleInformation.size()), nullptr);
+        ErrorCode = NtQuerySystemInformation(SystemHandleInformation, HandleInformation(), ULONG(HandleInformation.size()), nullptr);
         if(ErrorCode != STATUS_INFO_LENGTH_MISMATCH)
             break;
         HandleInformation.realloc(HandleInformation.size() * 2, "_dbg_enumhandles");
@@ -120,44 +59,168 @@ static DWORD WINAPI getNameThread(LPVOID lpParam)
     return 0;
 }
 
-bool HandlesGetName(HANDLE hProcess, HANDLE remoteHandle, String & name, String & typeName)
+static String getProcessName(DWORD PID)
 {
-    static auto ZwQueryObject = ZWQUERYOBJECT(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "ZwQueryObject"));
-    if(!ZwQueryObject)
-        return false;
+    wchar_t processName[MAX_PATH];
+    std::string processNameUtf8;
+    HANDLE hPIDProcess;
+    hPIDProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, PID);
+    if(hPIDProcess != NULL)
+    {
+        if(GetProcessImageFileNameW(hPIDProcess, processName, _countof(processName)) > 0)
+        {
+            processNameUtf8 = StringUtils::Utf16ToUtf8(processName);
+        }
+        CloseHandle(hPIDProcess);
+    }
+    return processNameUtf8;
+}
+
+// Get the name of a handle of debuggee
+bool HandlesGetName(HANDLE remoteHandle, String & name, String & typeName)
+{
+    HANDLE hProcess = fdProcessInfo->hProcess;
     HANDLE hLocalHandle;
-    if(DuplicateHandle(hProcess, remoteHandle, GetCurrentProcess(), &hLocalHandle, 0, FALSE, 0))
+    if(DuplicateHandle(hProcess, remoteHandle, GetCurrentProcess(), &hLocalHandle, 0, FALSE, DUPLICATE_SAME_ACCESS)) //Needs privileges for PID/TID retrival
     {
         ULONG ReturnSize = 0;
-        if(ZwQueryObject(hLocalHandle, ObjectTypeInformation, nullptr, 0, &ReturnSize) == STATUS_INFO_LENGTH_MISMATCH)
+        if(NtQueryObject(hLocalHandle, ObjectTypeInformation, nullptr, 0, &ReturnSize) == STATUS_INFO_LENGTH_MISMATCH)
         {
             ReturnSize += 0x2000;
             Memory<OBJECT_TYPE_INFORMATION*> objectTypeInfo(ReturnSize + sizeof(WCHAR) * 16, "_dbg_gethandlename:objectTypeInfo");
-            if(ZwQueryObject(hLocalHandle, ObjectTypeInformation, objectTypeInfo(), ReturnSize, nullptr) == STATUS_SUCCESS)
+            if(NtQueryObject(hLocalHandle, ObjectTypeInformation, objectTypeInfo(), ReturnSize, nullptr) == STATUS_SUCCESS)
                 typeName = StringUtils::Utf16ToUtf8(objectTypeInfo()->TypeName.Buffer);
         }
 
         std::function<void()> getName = [&]()
         {
-            if(ZwQueryObject(hLocalHandle, ObjectNameInformation, nullptr, 0, &ReturnSize) == STATUS_INFO_LENGTH_MISMATCH)
+            if(NtQueryObject(hLocalHandle, ObjectNameInformation, nullptr, 0, &ReturnSize) == STATUS_INFO_LENGTH_MISMATCH)
             {
                 ReturnSize += 0x2000;
                 Memory<OBJECT_NAME_INFORMATION*> objectNameInfo(ReturnSize + sizeof(WCHAR) * 16, "_dbg_gethandlename:objectNameInfo");
-                if(ZwQueryObject(hLocalHandle, ObjectNameInformation, objectNameInfo(), ReturnSize, nullptr) == STATUS_SUCCESS)
+                if(NtQueryObject(hLocalHandle, ObjectNameInformation, objectNameInfo(), ReturnSize, nullptr) == STATUS_SUCCESS)
                     name = StringUtils::Utf16ToUtf8(objectNameInfo()->Name.Buffer);
             }
         };
 
-        auto hThread = CreateThread(nullptr, 0, getNameThread, &getName, 0, nullptr);
-        auto result = WaitForSingleObject(hThread, 200);
-        if(result != WAIT_OBJECT_0)
+        name.clear();
+        if(strcmp(typeName.c_str(), "Process") == 0)
         {
-            TerminateThread(hThread, 0);
-            name = String(ErrorCodeToName(result));
-        }
-        else
-            CloseHandle(hThread);
+            DWORD PID = GetProcessId(hLocalHandle); //Windows XP SP1
+            String PIDString;
+            if(PID == 0) //The first time could fail because the process didn't specify query permissions.
+            {
+                HANDLE hLocalQueryHandle;
+                if(DuplicateHandle(hProcess, remoteHandle, GetCurrentProcess(), &hLocalQueryHandle, PROCESS_QUERY_INFORMATION, FALSE, 0))
+                {
+                    PID = GetProcessId(hLocalQueryHandle);
+                    CloseHandle(hLocalQueryHandle);
+                }
+            }
 
+            if(PID > 0)
+            {
+                duint value;
+                if(BridgeSettingGetUint("Gui", "PidTidInHex", &value) && value)
+                    PIDString = StringUtils::sprintf("%X", PID);
+                else
+                    PIDString = StringUtils::sprintf("%u", PID);
+                if(PID == fdProcessInfo->dwProcessId)
+                {
+                    name = StringUtils::sprintf("PID: %s (%s)", PIDString.c_str(), GuiTranslateText(QT_TRANSLATE_NOOP("DBG", "Debuggee")));
+                }
+                else
+                {
+                    std::string processName = getProcessName(PID);
+                    if(processName.size() > 0)
+                        name = StringUtils::sprintf("PID: %s (%s)", PIDString.c_str(), processName.c_str());
+                    else
+                        name = StringUtils::sprintf("PID: %s", PIDString.c_str());
+                }
+            }
+        }
+        else if(strcmp(typeName.c_str(), "Thread") == 0)
+        {
+            auto getTidPid = [](HANDLE hThread, DWORD & TID, DWORD & PID)
+            {
+                static auto pGetThreadId = (DWORD(__stdcall*)(HANDLE))GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadId");
+                static auto pGetProcessIdOfThread = (DWORD(__stdcall*)(HANDLE))GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetProcessIdOfThread");
+                if(pGetThreadId != NULL && pGetProcessIdOfThread != NULL) //Vista or Server 2003 only
+                {
+                    TID = pGetThreadId(hThread);
+                    PID = pGetProcessIdOfThread(hThread);
+                }
+                else //Windows XP
+                {
+                    THREAD_BASIC_INFORMATION threadInfo;
+                    ULONG threadInfoSize = 0;
+                    NTSTATUS isok = NtQueryInformationThread(hThread, ThreadBasicInformation, &threadInfo, sizeof(threadInfo), &threadInfoSize);
+                    if(NT_SUCCESS(isok))
+                    {
+                        TID = (DWORD)threadInfo.ClientId.UniqueThread;
+                        PID = (DWORD)threadInfo.ClientId.UniqueProcess;
+                    }
+                }
+            };
+
+            DWORD TID, PID;
+            getTidPid(hLocalHandle, TID, PID);
+            if(TID == 0 || PID == 0) //The first time could fail because the process didn't specify query permissions.
+            {
+                HANDLE hLocalQueryHandle;
+                if(DuplicateHandle(hProcess, remoteHandle, GetCurrentProcess(), &hLocalQueryHandle, THREAD_QUERY_INFORMATION, FALSE, 0))
+                {
+                    getTidPid(hLocalQueryHandle, TID, PID);
+                    CloseHandle(hLocalQueryHandle);
+                }
+            }
+
+            if(TID > 0 && PID > 0)
+            {
+                String TIDString, PIDString;
+                duint value;
+                if(BridgeSettingGetUint("Gui", "PidTidInHex", &value) && value)
+                {
+                    TIDString = StringUtils::sprintf("%X", TID);
+                    PIDString = StringUtils::sprintf("%X", PID);
+                }
+                else
+                {
+                    TIDString = StringUtils::sprintf("%u", TID);
+                    PIDString = StringUtils::sprintf("%u", PID);
+                }
+                // Check if the thread is in the debuggee
+                if(PID == fdProcessInfo->dwProcessId)
+                {
+                    char ThreadName[MAX_THREAD_NAME_SIZE];
+                    if(ThreadGetName(TID, ThreadName) && ThreadName[0] != 0)
+                        name = StringUtils::sprintf("TID: %s (%s), PID: %s (%s)", TIDString.c_str(), ThreadName, PIDString.c_str(), GuiTranslateText(QT_TRANSLATE_NOOP("DBG", "Debuggee")));
+                    else
+                        name = StringUtils::sprintf("TID: %s, PID: %s (%s)", TIDString.c_str(), PIDString.c_str(), GuiTranslateText(QT_TRANSLATE_NOOP("DBG", "Debuggee")));
+                }
+                else
+                {
+                    std::string processName = getProcessName(PID);
+                    if(processName.size() > 0)
+                        name = StringUtils::sprintf("TID: %s, PID: %s (%s)", TIDString.c_str(), PIDString.c_str(), processName.c_str());
+                    else
+                        name = StringUtils::sprintf("TID: %s, PID: %s", TIDString.c_str(), PIDString.c_str());
+                }
+            }
+        }
+        if(name.empty())
+        {
+            HANDLE hThread;
+            hThread = CreateThread(nullptr, 0, getNameThread, &getName, 0, nullptr);
+            auto result = WaitForSingleObject(hThread, 200);
+            if(result != WAIT_OBJECT_0)
+            {
+                TerminateThread(hThread, 0);
+                name = String(ErrorCodeToName(result));
+            }
+            else
+                CloseHandle(hThread);
+        }
         CloseHandle(hLocalHandle);
     }
     else
@@ -180,6 +243,29 @@ static WINDOW_INFO getWindowInfo(HWND hWnd)
     GetWindowRect(hWnd, &info.position); //Get Window Rect
     info.style = GetWindowLong(hWnd, GWL_STYLE); //Get Window Style
     info.styleEx = GetWindowLong(hWnd, GWL_EXSTYLE); //Get Window Stye ex
+    duint proc1, proc2;
+    proc1 = GetClassLongPtrW(hWnd, GCLP_WNDPROC);
+    proc2 = GetClassLongPtrA(hWnd, GCLP_WNDPROC);
+    if(!DbgMemIsValidReadPtr(proc1))
+        info.wndProc = proc2;
+    else if(!DbgMemIsValidReadPtr(proc2))
+        info.wndProc = proc1;
+    else if(IsWindowUnicode(hWnd))
+        info.wndProc = proc1;
+    else
+        info.wndProc = proc2;
+    if(DbgFunctions()->ModGetParty(info.wndProc) != 0 || !DbgMemIsValidReadPtr(info.wndProc))
+    {
+        duint dlgproc1, dlgproc2;
+        dlgproc1 = GetClassLongPtrW(hWnd, DWLP_DLGPROC);
+        dlgproc2 = GetClassLongPtrA(hWnd, DWLP_DLGPROC);
+        if(!DbgMemIsValidReadPtr(dlgproc1))
+            dlgproc1 = dlgproc2;
+        if(DbgMemIsValidReadPtr(dlgproc1))
+        {
+            info.wndProc = dlgproc1;
+        }
+    }
     info.enabled = IsWindowEnabled(hWnd) == TRUE;
     info.parent = (duint)GetParent(hWnd); //Get Parent Window
     info.threadId = GetWindowThreadProcessId(hWnd, nullptr); //Get Window Thread Id

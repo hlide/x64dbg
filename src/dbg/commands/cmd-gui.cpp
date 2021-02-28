@@ -116,7 +116,7 @@ bool cbInstrGraph(int argc, char* argv[])
         auto modbase = ModBaseFromAddr(base);
         if(modbase)
             base = modbase, size = ModSizeFromAddr(modbase);
-        RecursiveAnalysis analysis(base, size, entry, 0, true);
+        RecursiveAnalysis analysis(base, size, entry, true);
         analysis.Analyse();
         auto graph = analysis.GetFunctionGraph(entry);
         if(!graph)
@@ -126,10 +126,12 @@ bool cbInstrGraph(int argc, char* argv[])
             return false;
         }
         auto graphList = graph->ToGraphList();
-        GuiLoadGraph(&graphList, sel);
+        if(!GuiLoadGraph(&graphList, sel))
+            return false;
     }
     GuiUpdateAllViews();
-    GuiFocusView(GUI_GRAPH);
+    if(!silent)
+        GuiFocusView(GUI_GRAPH);
     return true;
 }
 
@@ -278,5 +280,27 @@ bool cbInstrFoldDisassembly(int argc, char* argv[])
         return false;
     }
     GuiFoldDisassembly(start, length);
+    return true;
+}
+
+bool cbDebugUpdateTitle(int argc, char* argv[])
+{
+    duint addr = 0;
+    if(argc > 1)
+    {
+        if(!valfromstring(argv[1], &addr))
+            addr = GetContextDataEx(hActiveThread, UE_CIP);
+    }
+    else
+    {
+        addr = GetContextDataEx(hActiveThread, UE_CIP);
+    }
+    DebugUpdateTitleAsync(addr, false);
+    return true;
+}
+
+bool cbShowReferences(int argc, char* argv[])
+{
+    GuiShowReferences();
     return true;
 }

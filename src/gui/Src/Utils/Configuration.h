@@ -8,6 +8,7 @@
 #include <QFont>
 #include "Imports.h"
 
+// TODO: declare AppearanceDialog and SettingsDialog entries here, so that you only have to do it in once place
 #define Config() (Configuration::instance())
 #define ConfigColor(x) (Config()->getColor(x))
 #define ConfigBool(x,y) (Config()->getBool(x,y))
@@ -31,9 +32,11 @@ public:
         QKeySequence Hotkey;
         bool GlobalShortcut;
 
-        inline Shortcut(QString n = QString(), QString h = QString(), bool g = false) : Name(n), Hotkey(h), GlobalShortcut(g)
-        {
-        }
+        Shortcut(QString name = QString(), QString hotkey = QString(), bool global = false)
+            : Name(name), Hotkey(hotkey, QKeySequence::PortableText), GlobalShortcut(global) { }
+
+        Shortcut(std::initializer_list<QString> names, QString hotkey = QString(), bool global = false)
+            : Shortcut(QStringList(names).join(" -> "), hotkey, global) { }
     };
 
     //Functions
@@ -43,30 +46,28 @@ public:
     void save();
     void readColors();
     void writeColors();
-    void emitColorsUpdated();
-    void emitTokenizerConfigUpdated();
     void readBools();
     void writeBools();
     void readUints();
     void writeUints();
     void readFonts();
     void writeFonts();
-    void emitFontsUpdated();
     void readShortcuts();
     void writeShortcuts();
-    void emitShortcutsUpdated();
     void registerMenuBuilder(MenuBuilder* menu, size_t count);
     void registerMainMenuStringList(QList<QAction*>* menu);
 
-    const QColor getColor(const QString id) const;
-    const bool getBool(const QString category, const QString id) const;
-    void setBool(const QString category, const QString id, const bool b);
-    const duint getUint(const QString category, const QString id) const;
-    void setUint(const QString category, const QString id, const duint i);
-    const QFont getFont(const QString id) const;
-    const Shortcut getShortcut(const QString key_id) const;
-    void setShortcut(const QString key_id, const QKeySequence key_sequence);
-    void setPluginShortcut(const QString key_id, QString description, QString defaultShortcut, bool global);
+    const QColor getColor(const QString & id) const;
+    const bool getBool(const QString & category, const QString & id) const;
+    void setBool(const QString & category, const QString & id, const bool b);
+    const duint getUint(const QString & category, const QString & id) const;
+    void setUint(const QString & category, const QString & id, const duint i);
+    const QFont getFont(const QString & id) const;
+    const Shortcut getShortcut(const QString & key_id) const;
+    void setShortcut(const QString & key_id, const QKeySequence key_sequence);
+    void setPluginShortcut(const QString & key_id, QString description, QString defaultShortcut, bool global);
+    void setupWindowPos(QWidget* window);
+    void saveWindowPos(QWidget* window);
 
     //default setting maps
     QMap<QString, QColor> defaultColors;
@@ -107,20 +108,22 @@ public:
 signals:
     void colorsUpdated();
     void fontsUpdated();
+    void guiOptionsUpdated();
     void shortcutsUpdated();
     void tokenizerConfigUpdated();
+    void disableAutoCompleteUpdated();
 
 private:
-    QColor colorFromConfig(const QString id);
-    bool colorToConfig(const QString id, const QColor color);
-    bool boolFromConfig(const QString category, const QString id);
-    bool boolToConfig(const QString category, const QString id, bool bBool);
-    duint uintFromConfig(const QString category, const QString id);
-    bool uintToConfig(const QString category, const QString id, duint i);
-    QFont fontFromConfig(const QString id);
-    bool fontToConfig(const QString id, const QFont font);
-    QString shortcutFromConfig(const QString id);
-    bool shortcutToConfig(const QString id, const QKeySequence shortcut);
+    QColor colorFromConfig(const QString & id);
+    bool colorToConfig(const QString & id, const QColor color);
+    bool boolFromConfig(const QString & category, const QString & id);
+    bool boolToConfig(const QString & category, const QString & id, bool bBool);
+    duint uintFromConfig(const QString & category, const QString & id);
+    bool uintToConfig(const QString & category, const QString & id, duint i);
+    QFont fontFromConfig(const QString & id);
+    bool fontToConfig(const QString & id, const QFont font);
+    QString shortcutFromConfig(const QString & id);
+    bool shortcutToConfig(const QString & id, const QKeySequence shortcut);
 
     mutable bool noMoreMsgbox;
 };

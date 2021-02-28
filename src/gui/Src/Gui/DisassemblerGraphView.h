@@ -12,17 +12,18 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <queue>
-#include <algorithm>
 #include <QMutex>
 #include "Bridge.h"
 #include "RichTextPainter.h"
 #include "QBeaEngine.h"
 #include "ActionHelpers.h"
+#include "VaHistory.h"
 
 class MenuBuilder;
 class CachedFontMetrics;
 class GotoDialog;
 class XrefBrowseDialog;
+class CommonActions;
 
 class DisassemblerGraphView : public QAbstractScrollArea, public ActionHelper<DisassemblerGraphView>
 {
@@ -99,7 +100,7 @@ public:
         {
             RichTextPainter::List richText;
             RichTextPainter::CustomRichText_t rt;
-            rt.highlight = false;
+            rt.underline = false;
             rt.text = text;
             rt.textColor = color;
             rt.textBackground = background;
@@ -171,7 +172,6 @@ public:
     {
         bool ready;
         duint entry;
-        duint update_id;
         std::vector<Block> blocks;
     };
 
@@ -180,7 +180,6 @@ public:
         duint entry = 0;
         std::unordered_map<duint, Function> functions;
         bool ready = false;
-        duint update_id = 0;
         QString status = "Analyzing...";
 
         bool find_instr(duint addr, duint & func, duint & instr)
@@ -202,18 +201,23 @@ public:
         Narrow,
     };
 
+    struct ClickPosition
+    {
+        QPoint pos = QPoint(0, 0);
+        bool inBlock = false;
+    };
+
     DisassemblerGraphView(QWidget* parent = nullptr);
     ~DisassemblerGraphView();
+    void resetGraph();
     void initFont();
-    void adjustSize(int width, int height);
+    void adjustSize(int viewportWidth, int viewportHeight, QPoint mousePosition = QPoint(0, 0), bool fitToWindow = false);
     void resizeEvent(QResizeEvent* event);
     duint get_cursor_pos();
     void set_cursor_pos(duint addr);
     std::tuple<duint, duint> get_selection_range();
     void set_selection_range(std::tuple<duint, duint> range);
     void copy_address();
-    //void analysis_thread_proc();
-    //void closeRequest();
     void paintNormal(QPainter & p, QRect & viewportRect, int xofs, int yofs);
     void paintOverview(QPainter & p, QRect & viewportRect, int xofs, int yofs);
     void paintEvent(QPaintEvent* event);
@@ -230,7 +234,6 @@ public:
     void computeGraphLayout(DisassemblerBlock & block);
     void setupContextMenu();
     void keyPressEvent(QKeyEvent* event);
-
     template<typename T>
     using Matrix = std::vector<std::vector<T>>;
     using EdgesVector = Matrix<std::vector<bool>>;
@@ -244,16 +247,25 @@ public:
     bool navigate(duint addr);
     void fontChanged();
     void setGraphLayout(LayoutType layout);
+    void paintZoom(QPainter & p, QRect & viewportRect, int xofs, int yofs);
+    void wheelEvent(QWheelEvent* event);
+    void showEvent(QShowEvent* event);
+    void zoomIn(QPoint mousePosition);
+    void zoomOut(QPoint mousePosition);
+    void showContextMenu(QMouseEvent* event);
+    duint zoomActionHelper();
+
+    VaHistory mHistory;
 
 signals:
-    void displaySnowmanWidget();
+    void selectionChanged(dsint parVA);
+    void displayLogWidget();
+    void detachGraph();
 
 public slots:
-    void updateTimerEvent();
     void loadGraphSlot(BridgeCFGraphList* graph, duint addr);
     void graphAtSlot(duint addr);
     void updateGraphSlot();
-    void followDisassemblerSlot();
     void colorsUpdatedSlot();
     void fontsUpdatedSlot();
     void shortcutsUpdatedSlot();
@@ -265,15 +277,32 @@ public slots:
     void disassembleAtSlot(dsint va, dsint cip);
     void gotoExpressionSlot();
     void gotoOriginSlot();
+    void gotoPreviousSlot();
+    void gotoNextSlot();
     void toggleSyncOriginSlot();
+    void followActionSlot();
+    void followDisassemblySlot();
     void refreshSlot();
     void saveImageSlot();
-    void setCommentSlot();
-    void setLabelSlot();
     void xrefSlot();
-    void decompileSlot();
+    void mnemonicHelpSlot();
+    void fitToWindowSlot();
+    void zoomToCursorSlot();
+    void getCurrentGraphSlot(BridgeCFGraphList* graphList);
+    void dbgStateChangedSlot(DBGSTATE state);
 
 private:
+    bool graphZoomMode;
+    qreal zoomLevel;
+    qreal zoomLevelOld;
+    qreal zoomMinimum;
+    qreal zoomMaximum;
+    qreal zoomOverviewValue;
+    qreal zoomStep;
+    //qreal zoomScrollThreshold;
+    int zoomDirection;
+    int zoomBoost;
+    ClickPosition lastRightClickPosition;
     QString status;
     Analysis analysis;
     duint function;
@@ -291,9 +320,9 @@ private:
     duint cur_instr;
     int scroll_base_x;
     int scroll_base_y;
-    duint update_id;
     bool scroll_mode;
     bool ready;
+    bool viewportReady;
     int* desired_pos;
     std::unordered_map<duint, DisassemblerBlock> blocks;
     HighlightToken* highlight_token;
@@ -301,6 +330,8 @@ private:
     std::vector<int> row_edge_y;
     CachedFontMetrics* mFontMetrics;
     MenuBuilder* mMenuBuilder;
+    CommonActions* mCommonActions;
+    QMenu* mPluginMenu;
     bool drawOverview;
     bool onlySummary;
     bool syncOrigin;
@@ -310,11 +341,14 @@ private:
     duint mCip;
     bool forceCenter;
     bool saveGraph;
+    bool mHistoryLock; //Don't add a history while going to previous/next
     LayoutType layoutType;
 
     QAction* mToggleOverview;
     QAction* mToggleSummary;
     QAction* mToggleSyncOrigin;
+    QAction* mFitToWindow;
+    QAction* mZoomToCursor;
 
     QColor disassemblyBackgroundColor;
     QColor disassemblySelectionColor;
@@ -332,15 +366,23 @@ private:
     QColor mCommentBackgroundColor;
     QColor mLabelColor;
     QColor mLabelBackgroundColor;
+    QColor mAddressColor;
+    QColor mAddressBackgroundColor;
     QColor mCipColor;
-    QColor mCipBackgroundColor;
+    QColor mBreakpointColor;
+    QColor mDisabledBreakpointColor;
+    QColor mBookmarkBackgroundColor;
     QColor graphNodeColor;
+    QColor graphNodeBackgroundColor;
+    QColor graphCurrentShadowColor;
 
     BridgeCFGraph currentGraph;
     std::unordered_map<duint, duint> currentBlockMap;
     QBeaEngine disasm;
     GotoDialog* mGoto;
     XrefBrowseDialog* mXrefDlg;
+
+    void addReferenceAction(QMenu* menu, duint addr, const QString & description);
 };
 
 #endif // DISASSEMBLERGRAPHVIEW_H

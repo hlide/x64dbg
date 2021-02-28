@@ -18,7 +18,8 @@ class XrefBrowseDialog : public QDialog, public ActionHelper<XrefBrowseDialog>
 public:
     explicit XrefBrowseDialog(QWidget* parent);
     ~XrefBrowseDialog();
-    void setup(duint address, QString command = "disasm");
+    using GotoFunction = std::function<void(duint)>;
+    void setup(duint address, GotoFunction gotoFunction);
 
 private slots:
     void on_listWidget_itemDoubleClicked(QListWidgetItem* item);
@@ -53,12 +54,13 @@ private:
 
     void changeAddress(duint address);
     void setupContextMenu();
+    QString GetFunctionSymbol(duint addr);
 
     XREF_INFO mXrefInfo;
     duint mAddress;
     int mPrevSelectionSize;
-    QString mCommand;
     MenuBuilder* mMenu;
+    GotoFunction mGotoFunction;
 };
 
 #endif // XREFBROWSEDIALOG_H

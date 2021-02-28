@@ -1,5 +1,6 @@
 #include "Breakpoints.h"
 #include "EditBreakpointDialog.h"
+#include "StringUtil.h"
 
 Breakpoints::Breakpoints(QObject* parent) : QObject(parent)
 {
@@ -44,7 +45,7 @@ void Breakpoints::setBP(BPXTYPE type, duint va)
     break;
     }
 
-    DbgCmdExec(wCmd.toUtf8().constData());
+    DbgCmdExec(wCmd);
 }
 
 /**
@@ -79,7 +80,7 @@ void Breakpoints::enableBP(const BRIDGEBP & bp)
         wCmd = QString("EnableExceptionBPX \"%1\"").arg(ToPtrString(bp.addr));
     }
 
-    DbgCmdExec(wCmd.toUtf8().constData());
+    DbgCmdExec(wCmd);
 }
 
 /**
@@ -144,7 +145,7 @@ void Breakpoints::disableBP(const BRIDGEBP & bp)
         wCmd = QString("DisableExceptionBPX \"%1\"").arg(ToPtrString(bp.addr));
     }
 
-    DbgCmdExec(wCmd.toUtf8().constData());
+    DbgCmdExec(wCmd);
 }
 
 /**
@@ -177,6 +178,17 @@ void Breakpoints::disableBP(BPXTYPE type, duint va)
         BridgeFree(wBPList.bp);
 }
 
+static QString getBpIdentifier(const BRIDGEBP & bp)
+{
+    if(*bp.mod)
+    {
+        auto modbase = DbgModBaseFromName(bp.mod);
+        if(!modbase)
+            return QString("\"%1\":$%2").arg(bp.mod).arg(ToHexString(bp.addr));
+    }
+    return ToPtrString(bp.addr);
+}
+
 /**
  * @brief       Remove breakpoint according to the given breakpoint descriptor.
  *
@@ -191,15 +203,15 @@ void Breakpoints::removeBP(const BRIDGEBP & bp)
     switch(bp.type)
     {
     case bp_normal:
-        wCmd = QString("bc \"%1\"").arg(ToPtrString(bp.addr));
+        wCmd = QString("bc \"%1\"").arg(getBpIdentifier(bp));
         break;
 
     case bp_hardware:
-        wCmd = QString("bphc \"%1\"").arg(ToPtrString(bp.addr));
+        wCmd = QString("bphc \"%1\"").arg(getBpIdentifier(bp));
         break;
 
     case bp_memory:
-        wCmd = QString("bpmc \"%1\"").arg(ToPtrString(bp.addr));
+        wCmd = QString("bpmc \"%1\"").arg(getBpIdentifier(bp));
         break;
 
     case bp_dll:
@@ -214,7 +226,7 @@ void Breakpoints::removeBP(const BRIDGEBP & bp)
         break;
     }
 
-    DbgCmdExec(wCmd.toUtf8().constData());
+    DbgCmdExec(wCmd);
 }
 
 /**
@@ -399,6 +411,30 @@ BPXSTATE Breakpoints::BPState(BPXTYPE type, duint va)
     return result;
 }
 
+bool Breakpoints::BPTrival(BPXTYPE type, duint va)
+{
+    BPMAP wBPList;
+    bool trival = true;
+
+    // Get breakpoints list
+    DbgGetBpList(type, &wBPList);
+
+    // Find breakpoint at address VA
+    for(int wI = 0; wI < wBPList.count; wI++)
+    {
+        BRIDGEBP & bp = wBPList.bp[wI];
+        if(bp.addr == va)
+        {
+            trival = !(bp.breakCondition[0] || bp.logCondition[0] || bp.commandCondition[0] || bp.commandText[0] || bp.logText[0] || bp.name[0] || bp.fastResume || bp.silent);
+            break;
+        }
+    }
+    if(wBPList.count)
+        BridgeFree(wBPList.bp);
+
+    return trival;
+}
+
 
 /**
  * @brief       Toggle the given breakpoint by disabling it when enabled.@n
@@ -461,24 +497,24 @@ void Breakpoints::toggleBPByRemoving(BPXTYPE type, duint va)
     }
 }
 
-void Breakpoints::editBP(BPXTYPE type, const QString & addrText, QWidget* widget)
+bool Breakpoints::editBP(BPXTYPE type, const QString & addrText, QWidget* widget)
 {
     BRIDGEBP bridgebp;
     if(type != bp_dll)
     {
         duint addr = addrText.toULongLong(nullptr, 16);
         if(!DbgFunctions()->GetBridgeBp(type, addr, &bridgebp))
-            return;
+            return false;
     }
     else if(!DbgFunctions()->GetBridgeBp(type, reinterpret_cast<duint>(addrText.toUtf8().constData()), &bridgebp))
-        return;
+        return false;
     EditBreakpointDialog dialog(widget, bridgebp);
     if(dialog.exec() != QDialog::Accepted)
-        return;
+        return false;
     auto bp = dialog.getBp();
     auto exec = [](const QString & command)
     {
-        DbgCmdExecDirect(command.toUtf8().constData());
+        DbgCmdExecDirect(command);
     };
     switch(type)
     {
@@ -543,7 +579,8 @@ void Breakpoints::editBP(BPXTYPE type, const QString & addrText, QWidget* widget
         exec(QString("SetExceptionBreakpointSingleshoot %1, %2").arg(addrText).arg(bp.singleshoot));
         break;
     default:
-        return;
+        return false;
     }
     GuiUpdateBreakpointsView();
+    return true;
 }

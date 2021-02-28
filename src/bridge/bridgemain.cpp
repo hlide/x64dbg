@@ -150,9 +150,9 @@ BRIDGE_IMPEXP bool BridgeSettingGetUint(const char* section, const char* key, du
     if(!BridgeSettingGet(section, key, newvalue))
         return false;
 #ifdef _WIN64
-    int ret = sscanf(newvalue, "%llX", value);
+    int ret = sscanf_s(newvalue, "%llX", value);
 #else
-    int ret = sscanf(newvalue, "%X", value);
+    int ret = sscanf_s(newvalue, "%X", value);
 #endif //_WIN64
     if(ret)
         return true;
@@ -251,6 +251,21 @@ BRIDGE_IMPEXP int BridgeGetDbgVersion()
     return DBG_VERSION;
 }
 
+BRIDGE_IMPEXP bool BridgeIsProcessElevated()
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = SECURITY_NT_AUTHORITY;
+    PSID SecurityIdentifier;
+    if(!AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &SecurityIdentifier))
+        return 0;
+
+    BOOL IsAdminMember;
+    if(!CheckTokenMembership(NULL, SecurityIdentifier, &IsAdminMember))
+        IsAdminMember = FALSE;
+
+    FreeSid(SecurityIdentifier);
+    return !!IsAdminMember;
+}
+
 BRIDGE_IMPEXP bool DbgMemRead(duint va, void* dest, duint size)
 {
 #ifdef _DEBUG
@@ -330,7 +345,7 @@ BRIDGE_IMPEXP bool DbgGetLabelAt(duint addr, SEGMENTREG segment, char* text) //(
 {
     if(!text || !addr)
         return false;
-    ADDRINFO info;
+    BRIDGE_ADDRINFO info;
     memset(&info, 0, sizeof(info));
     info.flags = flaglabel | flagNoFuncOffset;
     if(!_dbg_addrinfoget(addr, segment, &info))
@@ -339,10 +354,10 @@ BRIDGE_IMPEXP bool DbgGetLabelAt(duint addr, SEGMENTREG segment, char* text) //(
         if(!DbgMemIsValidReadPtr(addr))
             return false;
         DbgMemRead(addr, (unsigned char*)&addr_, sizeof(duint));
-        ADDRINFO ptrinfo = info;
+        BRIDGE_ADDRINFO ptrinfo = info;
         if(!_dbg_addrinfoget(addr_, SEG_DEFAULT, &ptrinfo))
             return false;
-        sprintf_s(info.label, "&%s", ptrinfo.label);
+        _snprintf_s(info.label, _TRUNCATE, "&%s", ptrinfo.label);
     }
     strcpy_s(text, MAX_LABEL_SIZE, info.label);
     return true;
@@ -352,7 +367,7 @@ BRIDGE_IMPEXP bool DbgSetLabelAt(duint addr, const char* text)
 {
     if(!text || strlen(text) >= MAX_LABEL_SIZE || !addr)
         return false;
-    ADDRINFO info;
+    BRIDGE_ADDRINFO info;
     memset(&info, 0, sizeof(info));
     info.flags = flaglabel;
     strcpy_s(info.label, text);
@@ -371,7 +386,7 @@ BRIDGE_IMPEXP bool DbgGetCommentAt(duint addr, char* text) //comment (not live)
 {
     if(!text || !addr)
         return false;
-    ADDRINFO info;
+    BRIDGE_ADDRINFO info;
     memset(&info, 0, sizeof(info));
     info.flags = flagcomment;
     if(!_dbg_addrinfoget(addr, SEG_DEFAULT, &info))
@@ -384,7 +399,7 @@ BRIDGE_IMPEXP bool DbgSetCommentAt(duint addr, const char* text)
 {
     if(!text || strlen(text) >= MAX_COMMENT_SIZE || !addr)
         return false;
-    ADDRINFO info;
+    BRIDGE_ADDRINFO info;
     memset(&info, 0, sizeof(info));
     info.flags = flagcomment;
     strcpy_s(info.comment, MAX_COMMENT_SIZE, text);
@@ -403,7 +418,7 @@ BRIDGE_IMPEXP bool DbgGetModuleAt(duint addr, char* text)
 {
     if(!text || !addr)
         return false;
-    ADDRINFO info;
+    BRIDGE_ADDRINFO info;
     memset(&info, 0, sizeof(info));
     info.flags = flagmodule;
     if(!_dbg_addrinfoget(addr, SEG_DEFAULT, &info))
@@ -416,7 +431,7 @@ BRIDGE_IMPEXP bool DbgGetBookmarkAt(duint addr)
 {
     if(!addr)
         return false;
-    ADDRINFO info;
+    BRIDGE_ADDRINFO info;
     memset(&info, 0, sizeof(info));
     info.flags = flagbookmark;
     if(!_dbg_addrinfoget(addr, SEG_DEFAULT, &info))
@@ -428,7 +443,7 @@ BRIDGE_IMPEXP bool DbgSetBookmarkAt(duint addr, bool isbookmark)
 {
     if(!addr)
         return false;
-    ADDRINFO info;
+    BRIDGE_ADDRINFO info;
     memset(&info, 0, sizeof(info));
     info.flags = flagbookmark;
     info.isbookmark = isbookmark;
@@ -463,9 +478,39 @@ BRIDGE_IMPEXP duint DbgValFromString(const char* string)
     return value;
 }
 
-BRIDGE_IMPEXP bool DbgGetRegDump(REGDUMP* regdump)
+//deprecated api, only provided for binary compatibility
+extern "C" __declspec(dllexport) bool DbgGetRegDump(REGDUMP* regdump)
 {
-    return _dbg_getregdump(regdump);
+    typedef struct
+    {
+        REGISTERCONTEXT regcontext;
+        FLAGS flags;
+        X87FPUREGISTER x87FPURegisters[8];
+        unsigned long long mmx[8];
+        MXCSRFIELDS MxCsrFields;
+        X87STATUSWORDFIELDS x87StatusWordFields;
+        X87CONTROLWORDFIELDS x87ControlWordFields;
+        LASTERROR lastError;
+    } REGDUMP_OLD;
+    return DbgGetRegDumpEx(regdump, sizeof(REGDUMP_OLD));
+}
+
+BRIDGE_IMPEXP bool DbgGetRegDumpEx(REGDUMP* regdump, size_t size)
+{
+    if(size == sizeof(REGDUMP))
+        return _dbg_getregdump(regdump);
+
+    if(size > sizeof(REGDUMP))
+        __debugbreak();
+
+    REGDUMP temp;
+    if(!_dbg_getregdump(&temp))
+    {
+        memset(regdump, 0, size);
+        return false;
+    }
+    memcpy(regdump, &temp, size);
+    return true;
 }
 
 // FIXME all
@@ -493,7 +538,7 @@ BRIDGE_IMPEXP bool DbgCmdExecDirect(const char* cmd)
 
 BRIDGE_IMPEXP FUNCTYPE DbgGetFunctionTypeAt(duint addr)
 {
-    ADDRINFO info;
+    BRIDGE_ADDRINFO info;
     memset(&info, 0, sizeof(info));
     info.flags = flagfunction;
     if(!_dbg_addrinfoget(addr, SEG_DEFAULT, &info))
@@ -512,7 +557,7 @@ BRIDGE_IMPEXP FUNCTYPE DbgGetFunctionTypeAt(duint addr)
 // FIXME depth
 BRIDGE_IMPEXP LOOPTYPE DbgGetLoopTypeAt(duint addr, int depth)
 {
-    ADDRINFO info;
+    BRIDGE_ADDRINFO info;
     memset(&info, 0, sizeof(info));
     info.flags = flagloop;
     info.loop.depth = depth;
@@ -758,8 +803,10 @@ BRIDGE_IMPEXP bool DbgLoopGet(int depth, duint addr, duint* start, duint* end)
     info.depth = depth;
     if(!_dbg_sendmessage(DBG_LOOP_GET, &info, 0))
         return false;
-    *start = info.start;
-    *end = info.end;
+    if(start)
+        *start = info.start;
+    if(end)
+        *end = info.end;
     return true;
 }
 
@@ -940,7 +987,7 @@ BRIDGE_IMPEXP duint DbgGetTimeWastedCounter()
 
 BRIDGE_IMPEXP ARGTYPE DbgGetArgTypeAt(duint addr)
 {
-    ADDRINFO info;
+    BRIDGE_ADDRINFO info;
     memset(&info, 0, sizeof(info));
     info.flags = flagargs;
     if(!_dbg_addrinfoget(addr, SEG_DEFAULT, &info))
@@ -1040,6 +1087,21 @@ BRIDGE_IMPEXP duint DbgEval(const char* expression, bool* success)
     return value;
 }
 
+BRIDGE_IMPEXP void DbgMenuPrepare(GUIMENUTYPE hMenu)
+{
+    _dbg_sendmessage(DBG_MENU_PREPARE, (void*)hMenu, nullptr);
+}
+
+BRIDGE_IMPEXP void DbgGetSymbolInfo(const SYMBOLPTR* symbolptr, SYMBOLINFO* info)
+{
+    _dbg_sendmessage(DBG_GET_SYMBOL_INFO, (void*)symbolptr, info);
+}
+
+BRIDGE_IMPEXP DEBUG_ENGINE DbgGetDebugEngine()
+{
+    return (DEBUG_ENGINE)_dbg_sendmessage(DBG_GET_DEBUG_ENGINE, nullptr, nullptr);
+}
+
 BRIDGE_IMPEXP const char* GuiTranslateText(const char* Source)
 {
     EnterCriticalSection(&csTranslate);
@@ -1055,7 +1117,12 @@ BRIDGE_IMPEXP void GuiDisasmAt(duint addr, duint cip)
 
 BRIDGE_IMPEXP void GuiSetDebugState(DBGSTATE state)
 {
-    _gui_sendmessage(GUI_SET_DEBUG_STATE, (void*)state, 0);
+    _gui_sendmessage(GUI_SET_DEBUG_STATE, (void*)state, (void*)false);
+}
+
+BRIDGE_IMPEXP void GuiSetDebugStateFast(DBGSTATE state)
+{
+    _gui_sendmessage(GUI_SET_DEBUG_STATE, (void*)state, (void*)true);
 }
 
 BRIDGE_IMPEXP void GuiAddLogMessage(const char* msg)
@@ -1100,8 +1167,10 @@ BRIDGE_IMPEXP void GuiUpdateAllViews()
     GuiRepaintTableView();
     GuiUpdateSEHChain();
     GuiUpdateArgumentWidget();
+    GuiUpdateMemoryView();
     GuiUpdateGraphView();
     GuiUpdateTypeWidget();
+    GuiUpdateTraceBrowser();
 }
 
 BRIDGE_IMPEXP void GuiUpdateRegisterView()
@@ -1223,6 +1292,11 @@ BRIDGE_IMPEXP int GuiReferenceGetRowCount()
     return (int)(duint)_gui_sendmessage(GUI_REF_GETROWCOUNT, 0, 0);
 }
 
+BRIDGE_IMPEXP int GuiReferenceSearchGetRowCount()
+{
+    return int(_gui_sendmessage(GUI_REF_SEARCH_GETROWCOUNT, 0, 0));
+}
+
 BRIDGE_IMPEXP void GuiReferenceDeleteAllColumns()
 {
     _gui_sendmessage(GUI_REF_DELETEALLCOLUMNS, 0, 0);
@@ -1245,6 +1319,11 @@ BRIDGE_IMPEXP void GuiReferenceSetCellContent(int row, int col, const char* str)
 BRIDGE_IMPEXP char* GuiReferenceGetCellContent(int row, int col)
 {
     return (char*)_gui_sendmessage(GUI_REF_GETCELLCONTENT, (void*)(duint)row, (void*)(duint)col);
+}
+
+BRIDGE_IMPEXP char* GuiReferenceSearchGetCellContent(int row, int col)
+{
+    return (char*)_gui_sendmessage(GUI_REF_SEARCH_GETCELLCONTENT, (void*)row, (void*)col);
 }
 
 BRIDGE_IMPEXP void GuiReferenceReloadData()
@@ -1336,12 +1415,17 @@ BRIDGE_IMPEXP void GuiMenuClear(int hMenu)
     _gui_sendmessage(GUI_MENU_CLEAR, (void*)(duint)hMenu, 0);
 }
 
-BRIDGE_IMPEXP bool GuiSelectionGet(int hWindow, SELECTIONDATA* selection)
+BRIDGE_IMPEXP void GuiMenuRemove(int hEntryMenu)
+{
+    _gui_sendmessage(GUI_MENU_REMOVE, (void*)(duint)hEntryMenu, 0);
+}
+
+BRIDGE_IMPEXP bool GuiSelectionGet(GUISELECTIONTYPE hWindow, SELECTIONDATA* selection)
 {
     return !!_gui_sendmessage(GUI_SELECTION_GET, (void*)(duint)hWindow, selection);
 }
 
-BRIDGE_IMPEXP bool GuiSelectionSet(int hWindow, const SELECTIONDATA* selection)
+BRIDGE_IMPEXP bool GuiSelectionSet(GUISELECTIONTYPE hWindow, const SELECTIONDATA* selection)
 {
     return !!_gui_sendmessage(GUI_SELECTION_SET, (void*)(duint)hWindow, (void*)selection);
 }
@@ -1401,9 +1485,14 @@ BRIDGE_IMPEXP void GuiUpdateSEHChain()
     _gui_sendmessage(GUI_UPDATE_SEHCHAIN, 0, 0);
 }
 
-BRIDGE_IMPEXP void GuiLoadSourceFile(const char* path, int line)
+extern "C" __declspec(dllexport) void GuiLoadSourceFile(const char* path, int line)
 {
-    _gui_sendmessage(GUI_LOAD_SOURCE_FILE, (void*)path, (void*)line);
+    return;
+}
+
+BRIDGE_IMPEXP void GuiLoadSourceFileEx(const char* path, duint addr)
+{
+    _gui_sendmessage(GUI_LOAD_SOURCE_FILE, (void*)path, (void*)addr);
 }
 
 BRIDGE_IMPEXP void GuiMenuSetIcon(int hMenu, const ICONDATA* icon)
@@ -1428,17 +1517,17 @@ BRIDGE_IMPEXP void GuiMenuSetVisible(int hMenu, bool visible)
 
 BRIDGE_IMPEXP void GuiMenuSetEntryVisible(int hEntry, bool visible)
 {
-    _gui_sendmessage(GUI_MENU_SET_VISIBLE, (void*)hEntry, (void*)visible);
+    _gui_sendmessage(GUI_MENU_SET_ENTRY_VISIBLE, (void*)hEntry, (void*)visible);
 }
 
 BRIDGE_IMPEXP void GuiMenuSetName(int hMenu, const char* name)
 {
-    _gui_sendmessage(GUI_MENU_SET_VISIBLE, (void*)hMenu, (void*)name);
+    _gui_sendmessage(GUI_MENU_SET_NAME, (void*)hMenu, (void*)name);
 }
 
 BRIDGE_IMPEXP void GuiMenuSetEntryName(int hEntry, const char* name)
 {
-    _gui_sendmessage(GUI_MENU_SET_VISIBLE, (void*)hEntry, (void*)name);
+    _gui_sendmessage(GUI_MENU_SET_ENTRY_NAME, (void*)hEntry, (void*)name);
 }
 
 BRIDGE_IMPEXP void GuiMenuSetEntryHotkey(int hEntry, const char* hack)
@@ -1468,7 +1557,10 @@ BRIDGE_IMPEXP void GuiCloseQWidgetTab(void* qWidget)
 
 BRIDGE_IMPEXP void GuiExecuteOnGuiThread(GUICALLBACK cbGuiThread)
 {
-    _gui_sendmessage(GUI_EXECUTE_ON_GUI_THREAD, (void*)cbGuiThread, nullptr);
+    GuiExecuteOnGuiThreadEx([](void* cb)
+    {
+        ((GUICALLBACK)cb)();
+    }, cbGuiThread);
 }
 
 BRIDGE_IMPEXP void GuiUpdateTimeWastedCounter()
@@ -1527,9 +1619,9 @@ BRIDGE_IMPEXP void GuiFocusView(int hWindow)
     _gui_sendmessage(GUI_FOCUS_VIEW, (void*)hWindow, nullptr);
 }
 
-BRIDGE_IMPEXP void GuiLoadGraph(BridgeCFGraphList* graph, duint addr)
+BRIDGE_IMPEXP bool GuiLoadGraph(BridgeCFGraphList* graph, duint addr)
 {
-    _gui_sendmessage(GUI_LOAD_GRAPH, graph, (void*)addr);
+    return !!_gui_sendmessage(GUI_LOAD_GRAPH, graph, (void*)addr);
 }
 
 BRIDGE_IMPEXP duint GuiGraphAt(duint addr)
@@ -1616,6 +1708,42 @@ BRIDGE_IMPEXP void GuiCloseApplication()
 BRIDGE_IMPEXP void GuiFlushLog()
 {
     _gui_sendmessage(GUI_FLUSH_LOG, nullptr, nullptr);
+}
+
+BRIDGE_IMPEXP void GuiReferenceAddCommand(const char* title, const char* command)
+{
+    _gui_sendmessage(GUI_REF_ADDCOMMAND, (void*)title, (void*)command);
+}
+
+BRIDGE_IMPEXP void GuiUpdateTraceBrowser()
+{
+    CHECK_GUI_UPDATE_DISABLED
+    _gui_sendmessage(GUI_UPDATE_TRACE_BROWSER, nullptr, nullptr);
+}
+
+BRIDGE_IMPEXP void GuiOpenTraceFile(const char* fileName)
+{
+    _gui_sendmessage(GUI_OPEN_TRACE_FILE, (void*)fileName, nullptr);
+}
+
+BRIDGE_IMPEXP void GuiInvalidateSymbolSource(duint base)
+{
+    _gui_sendmessage(GUI_INVALIDATE_SYMBOL_SOURCE, (void*)base, nullptr);
+}
+
+BRIDGE_IMPEXP void GuiExecuteOnGuiThreadEx(GUICALLBACKEX cbGuiThread, void* userdata)
+{
+    _gui_sendmessage(GUI_EXECUTE_ON_GUI_THREAD, (void*)cbGuiThread, userdata);
+}
+
+BRIDGE_IMPEXP void GuiGetCurrentGraph(BridgeCFGraphList* graphList)
+{
+    _gui_sendmessage(GUI_GET_CURRENT_GRAPH, graphList, nullptr);
+}
+
+BRIDGE_IMPEXP void GuiShowReferences()
+{
+    _gui_sendmessage(GUI_SHOW_REF, 0, 0);
 }
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)

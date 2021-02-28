@@ -2,8 +2,7 @@
 #define _THREAD_H
 
 #include "_global.h"
-#include "debugger.h"
-#include "undocumented.h"
+#include "ntdll/ntdll.h"
 
 void ThreadCreate(CREATE_THREAD_DEBUG_INFO* CreateThread);
 void ThreadExit(DWORD ThreadId);
@@ -20,6 +19,8 @@ int ThreadGetSuspendCount(HANDLE Thread);
 THREADPRIORITY ThreadGetPriority(HANDLE Thread);
 DWORD ThreadGetLastErrorTEB(ULONG_PTR ThreadLocalBase);
 DWORD ThreadGetLastError(DWORD ThreadId);
+NTSTATUS ThreadGetLastStatusTEB(ULONG_PTR ThreadLocalBase);
+NTSTATUS ThreadGetLastStatus(DWORD ThreadId);
 bool ThreadSetName(DWORD dwThreadId, const char* name);
 bool ThreadGetName(DWORD ThreadId, char* Name);
 HANDLE ThreadGetHandle(DWORD ThreadId);

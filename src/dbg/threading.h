@@ -6,7 +6,6 @@
 enum WAIT_ID
 {
     WAITID_RUN,
-    WAITID_STOP,
     WAITID_LAST
 };
 
@@ -73,9 +72,9 @@ enum SectionLock
     LockTypeManager,
     LockModuleHashes,
     LockFormatFunctions,
+    LockDllBreakpoints,
 
-    // Number of elements in this enumeration. Must always be the last
-    // index.
+    // Number of elements in this enumeration. Must always be the last index.
     LockLast
 };
 
@@ -95,6 +94,9 @@ private:
         {
             if(Shared)
             {
+                if(m_owner[LockIndex].thread == GetCurrentThreadId())
+                    return;
+
                 m_AcquireSRWLockShared(&m_srwLocks[LockIndex]);
                 return;
             }
@@ -107,6 +109,7 @@ private:
             }
 
             m_AcquireSRWLockExclusive(&m_srwLocks[LockIndex]);
+
             assert(m_owner[LockIndex].thread == 0);
             assert(m_owner[LockIndex].count == 0);
             m_owner[LockIndex].thread = GetCurrentThreadId();
@@ -122,12 +125,16 @@ private:
         {
             if(Shared)
             {
+                if(m_owner[LockIndex].thread == GetCurrentThreadId())
+                    return;
+
                 m_ReleaseSRWLockShared(&m_srwLocks[LockIndex]);
                 return;
             }
 
             assert(m_owner[LockIndex].count && m_owner[LockIndex].thread);
             m_owner[LockIndex].count--;
+
             if(m_owner[LockIndex].count == 0)
             {
                 m_owner[LockIndex].thread = 0;
@@ -168,22 +175,25 @@ public:
         if(m_LockCount > 0)
             Unlock();
 
-#ifdef _DEBUG
-        // Assert that the lock count is zero on destructor
-        if(m_LockCount > 0)
-            __debugbreak();
-#endif
+        // The lock count should be zero after destruction.
+        assert(m_LockCount == 0);
     }
 
     inline void Lock()
     {
         Internal::AcquireLock(LockIndex, Shared);
 
+        // We cannot recursively lock more than 255 times.
+        assert(m_LockCount < 255);
+
         m_LockCount++;
     }
 
     inline void Unlock()
     {
+        // Unlocking twice will cause undefined behaviour.
+        assert(m_LockCount != 0);
+
         m_LockCount--;
 
         Internal::ReleaseLock(LockIndex, Shared);

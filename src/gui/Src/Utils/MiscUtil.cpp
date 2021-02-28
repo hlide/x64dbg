@@ -1,14 +1,22 @@
 #include "MiscUtil.h"
-#include <windows.h>
-#include "LineEditDialog.h"
+#include <QtWin>
+#include <QApplication>
 #include <QMessageBox>
+#include <QDir>
+#include "LineEditDialog.h"
+#include "ComboBoxDialog.h"
 #include "StringUtil.h"
+#include "BrowseDialog.h"
+#include <thread>
 
 void SetApplicationIcon(WId winId)
 {
-    HICON hIcon = LoadIcon(GetModuleHandleW(0), MAKEINTRESOURCE(100));
-    SendMessageW((HWND)winId, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
-    DestroyIcon(hIcon);
+    std::thread([winId]
+    {
+        HICON hIcon = LoadIcon(GetModuleHandleW(0), MAKEINTRESOURCE(100));
+        SendMessageW((HWND)winId, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
+        DestroyIcon(hIcon);
+    }).detach();
 }
 
 QByteArray & ByteReverse(QByteArray & array)
@@ -23,7 +31,19 @@ QByteArray & ByteReverse(QByteArray & array)
     return array;
 }
 
-bool SimpleInputBox(QWidget* parent, const QString & title, QString defaultValue, QString & output, const QString & placeholderText, QIcon* icon)
+QByteArray ByteReverse(QByteArray && array)
+{
+    int length = array.length();
+    for(int i = 0; i < length / 2; i++)
+    {
+        char temp = array[i];
+        array[i] = array[length - i - 1];
+        array[length - i - 1] = temp;
+    }
+    return array;
+}
+
+bool SimpleInputBox(QWidget* parent, const QString & title, QString defaultValue, QString & output, const QString & placeholderText, const QIcon* icon)
 {
     LineEditDialog mEdit(parent);
     mEdit.setWindowIcon(icon ? *icon : parent->windowIcon());
@@ -40,10 +60,31 @@ bool SimpleInputBox(QWidget* parent, const QString & title, QString defaultValue
         return false;
 }
 
+bool SimpleChoiceBox(QWidget* parent, const QString & title, QString defaultValue, const QStringList & choices, QString & output, bool editable, const QString & placeholderText, const QIcon* icon, int minimumContentsLength)
+{
+    ComboBoxDialog mChoice(parent);
+    mChoice.setWindowIcon(icon ? *icon : parent->windowIcon());
+    mChoice.setEditable(editable);
+    mChoice.setItems(choices);
+    mChoice.setText(defaultValue);
+    mChoice.setPlaceholderText(placeholderText);
+    mChoice.setWindowTitle(title);
+    mChoice.setCheckBox(false);
+    if(minimumContentsLength >= 0)
+        mChoice.setMinimumContentsLength(minimumContentsLength);
+    if(mChoice.exec() == QDialog::Accepted)
+    {
+        output = mChoice.currentText();
+        return true;
+    }
+    else
+        return false;
+}
+
 void SimpleErrorBox(QWidget* parent, const QString & title, const QString & text)
 {
     QMessageBox msg(QMessageBox::Critical, title, text, QMessageBox::NoButton, parent);
-    msg.setWindowIcon(DIcon("compile-error.png"));
+    msg.setWindowIcon(DIcon("fatal-error.png"));
     msg.setParent(parent, Qt::Dialog);
     msg.setWindowFlags(msg.windowFlags() & (~Qt::WindowContextHelpButtonHint));
     msg.exec();
@@ -52,7 +93,16 @@ void SimpleErrorBox(QWidget* parent, const QString & title, const QString & text
 void SimpleWarningBox(QWidget* parent, const QString & title, const QString & text)
 {
     QMessageBox msg(QMessageBox::Warning, title, text, QMessageBox::NoButton, parent);
-    msg.setWindowIcon(DIcon("compile-warning.png"));
+    msg.setWindowIcon(DIcon("exclamation.png"));
+    msg.setParent(parent, Qt::Dialog);
+    msg.setWindowFlags(msg.windowFlags() & (~Qt::WindowContextHelpButtonHint));
+    msg.exec();
+}
+
+void SimpleInfoBox(QWidget* parent, const QString & title, const QString & text)
+{
+    QMessageBox msg(QMessageBox::Information, title, text, QMessageBox::NoButton, parent);
+    msg.setWindowIcon(DIcon("information.png"));
     msg.setParent(parent, Qt::Dialog);
     msg.setWindowFlags(msg.windowFlags() & (~Qt::WindowContextHelpButtonHint));
     msg.exec();
@@ -74,6 +124,169 @@ QString getSymbolicName(duint addr)
         return QString("<%1>").arg(labelText);
     else
         return addrText;
+}
+
+QString getSymbolicNameStr(duint addr)
+{
+    char labelText[MAX_LABEL_SIZE] = "";
+    char moduleText[MAX_MODULE_SIZE] = "";
+    char string[MAX_STRING_SIZE] = "";
+    bool bHasString = DbgGetStringAt(addr, string);
+    bool bHasLabel = DbgGetLabelAt(addr, SEG_DEFAULT, labelText);
+    bool bHasModule = (DbgGetModuleAt(addr, moduleText) && !QString(labelText).startsWith("JMP.&"));
+    QString addrText = DbgMemIsValidReadPtr(addr) ? ToPtrString(addr) : ToHexString(addr);
+    QString finalText;
+    if(bHasString)
+        finalText = addrText + " " + QString(string);
+    else if(bHasLabel && bHasModule) //<module.label>
+        finalText = QString("<%1.%2>").arg(moduleText).arg(labelText);
+    else if(bHasModule) //module.addr
+        finalText = QString("%1.%2").arg(moduleText).arg(addrText);
+    else if(bHasLabel) //<label>
+        finalText = QString("<%1>").arg(labelText);
+    else
+    {
+        finalText = addrText;
+        if(addr == (addr & 0xFF))
+        {
+            QChar c = QChar((char)addr);
+            if(c.isPrint() || c.isSpace())
+                finalText += QString(" '%1'").arg(EscapeCh(c));
+        }
+        else if(addr == (addr & 0xFFF)) //UNICODE?
+        {
+            QChar c = QChar((ushort)addr);
+            if(c.isPrint() || c.isSpace())
+                finalText += QString(" L'%1'").arg(EscapeCh(c));
+        }
+    }
+    return finalText;
+}
+
+QIcon getFileIcon(QString file)
+{
+    SHFILEINFO info;
+    if(SHGetFileInfoW((const wchar_t*)file.utf16(), 0, &info, sizeof(info), SHGFI_ICON) == 0)
+        return QIcon(); //API error
+    QIcon result = QIcon(QtWin::fromHICON(info.hIcon));
+    DestroyIcon(info.hIcon);
+    return result;
+}
+
+//Export table in CSV. TODO: Display a dialog where the user choose what column to export and in which encoding
+bool ExportCSV(dsint rows, dsint columns, std::vector<QString> headers, std::function<QString(dsint, dsint)> getCellContent)
+{
+    BrowseDialog browse(nullptr, QApplication::translate("ExportCSV", "Export data in CSV format"), QApplication::translate("ExportCSV", "Enter the CSV file name to export"), QApplication::translate("ExportCSV", "CSV files (*.csv);;All files (*.*)"), QApplication::applicationDirPath() + QDir::separator() + "db", true);
+    browse.setWindowIcon(DIcon("database-export.png"));
+    if(browse.exec() == QDialog::Accepted)
+    {
+        FILE* csv;
+        bool utf16;
+        csv = _wfopen(browse.path.toStdWString().c_str(), L"wb");
+        if(csv == NULL)
+        {
+            GuiAddLogMessage(QApplication::translate("ExportCSV", "CSV export error\n").toUtf8().constData());
+            return false;
+        }
+        else
+        {
+            duint setting;
+            if(BridgeSettingGetUint("Misc", "Utf16LogRedirect", &setting))
+                utf16 = !!setting;
+            else
+                utf16 = false;
+            if(utf16 && ftell(csv) == 0)
+            {
+                unsigned short BOM = 0xfeff;
+                fwrite(&BOM, 2, 1, csv);
+            }
+            dsint row, column;
+            QString text;
+            QString cell;
+            if(headers.size() > 0)
+            {
+                for(column = 0; column < columns; column++)
+                {
+                    cell = headers.at(column);
+                    if(cell.contains('"') || cell.contains(',') || cell.contains('\r') || cell.contains('\n'))
+                    {
+                        if(cell.contains('"'))
+                            cell = cell.replace("\"", "\"\"");
+                        cell = "\"" + cell + "\"";
+                    }
+                    if(column != columns - 1)
+                        cell = cell + ",";
+                    text = text + cell;
+                }
+                if(utf16)
+                {
+                    text = text + "\r\n";
+                    if(!fwrite(text.utf16(), text.length(), 2, csv))
+                    {
+                        fclose(csv);
+                        GuiAddLogMessage(QApplication::translate("ExportCSV", "CSV export error\n").toUtf8().constData());
+                        return false;
+                    }
+                }
+                else
+                {
+                    text = text + "\n";
+                    QByteArray utf8;
+                    utf8 = text.toUtf8();
+                    if(!fwrite(utf8.constData(), utf8.size(), 1, csv))
+                    {
+                        fclose(csv);
+                        GuiAddLogMessage(QApplication::translate("ExportCSV", "CSV export error\n").toUtf8().constData());
+                        return false;
+                    }
+                }
+            }
+            for(row = 0; row < rows; row++)
+            {
+                text.clear();
+                for(column = 0; column < columns; column++)
+                {
+                    cell = getCellContent(row, column);
+                    if(cell.contains('"') || cell.contains(',') || cell.contains('\r') || cell.contains('\n'))
+                    {
+                        if(cell.contains('"'))
+                            cell = cell.replace("\"", "\"\"");
+                        cell = "\"" + cell + "\"";
+                    }
+                    if(column != columns - 1)
+                        cell = cell + ",";
+                    text = text + cell;
+                }
+                if(utf16)
+                {
+                    text = text + "\r\n";
+                    if(!fwrite(text.utf16(), text.length(), 2, csv))
+                    {
+                        fclose(csv);
+                        GuiAddLogMessage(QApplication::translate("ExportCSV", "CSV export error\n").toUtf8().constData());
+                        return false;
+                    }
+                }
+                else
+                {
+                    text = text + "\n";
+                    QByteArray utf8;
+                    utf8 = text.toUtf8();
+                    if(!fwrite(utf8.constData(), utf8.size(), 1, csv))
+                    {
+                        fclose(csv);
+                        GuiAddLogMessage(QApplication::translate("ExportCSV", "CSV export error\n").toUtf8().constData());
+                        return false;
+                    }
+                }
+            }
+            fclose(csv);
+            GuiAddLogMessage(QApplication::translate("ExportCSV", "Saved CSV data at %1\n").arg(browse.path).toUtf8().constData());
+            return true;
+        }
+    }
+    else
+        return false;
 }
 
 static bool allowSeasons()
@@ -110,8 +323,11 @@ bool isEaster()
 
 QString couldItBeSeasonal(QString icon)
 {
+    static bool seasons = allowSeasons();
     static bool christmas = isChristmas();
     static bool easter = isEaster();
+    if(!seasons)
+        return icon;
     if(christmas)
         return QString("christmas%1.png").arg(rand() % 8 + 1);
     else if(easter)

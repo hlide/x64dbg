@@ -1,6 +1,7 @@
 #include "MRUList.h"
 #include "Bridge.h"
 #include <QMenu>
+#include <QFile>
 
 MRUList::MRUList(QObject* parent, const char* section, int maxItems)
     : QObject(parent),
@@ -87,7 +88,7 @@ QString MRUList::getEntry(int index)
     if(index < mMRUList.size())
         return mMRUList.at(index);
 
-    return "";
+    return QString();
 }
 
 void MRUList::openFileSlot()
